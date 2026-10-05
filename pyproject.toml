@@ -1,0 +1,30 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pairwise-prioritizer"
+version = "1.0.0"
+description = "PairRank: thoughtful pairwise prioritization in your terminal"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = ["textual>=1.0,<7", "platformdirs>=4.0"]
+
+[project.scripts]
+pairrank = "pairwise_prioritizer.__main__:main"
+
+[dependency-groups]
+dev = ["pytest>=8", "pytest-asyncio>=1.0", "ruff>=0.9"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pairwise_prioritizer"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+

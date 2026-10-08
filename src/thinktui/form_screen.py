@@ -9,15 +9,38 @@ from typing import Any
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import Screen
 from textual.widgets import Button, Footer, Header, Input, Label, Select, Static, TextArea
 
 from .ai import connect, selected_provider, visible_text
 from .core import METHODS, Session, timestamp
 from .field_ai import stream_text_draft
-from .form_model import FormField, blank, draft_from_example, normalize_ids, parse, rename_grid_label, schema_for, title
+from .form_model import (
+    ENUM_CHOICES,
+    FormField,
+    blank,
+    conditional_node_fields,
+    draft_from_example,
+    normalize_ids,
+    parse,
+    rename_grid_label,
+    schema_for,
+    title,
+    validate_monte_variable,
+)
 from .reports import export
+
+
+class FormContents(Vertical):
+    """Recompose changing fields without tearing down the Header or Footer."""
+
+    def __init__(self, owner: FormScreen) -> None:
+        super().__init__(classes="form-contents", id="form-contents")
+        self.owner = owner
+
+    def compose(self) -> ComposeResult:
+        yield from self.owner.compose_fields()
 
 
 class FormScreen(Screen):
@@ -35,6 +58,7 @@ class FormScreen(Screen):
         self.draft = deepcopy(session.method_state)
         self.fields: dict[str, tuple[tuple[Any, ...], FormField]] = {}
         self.groups: dict[str, tuple[Any, ...]] = {}
+        self.group_specs: dict[str, FormField] = {}
         self.extra_keys: dict[str, tuple[Any, ...]] = {}
         self.pending_labels: dict[tuple[Any, ...], str] = {}
         self.ai_target: str | None = None
@@ -45,43 +69,50 @@ class FormScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield Header()
+        with VerticalScroll(classes="page"):
+            yield FormContents(self)
+        yield Footer()
+
+    def compose_fields(self) -> ComposeResult:
         method = METHODS[self.session.method_id]
         self.fields = {}
         self.groups = {}
+        self.group_specs = {}
         self.extra_keys = {}
-        with VerticalScroll(classes="page"):
-            yield Label(f"{self.session.title} · {method.name}", classes="hero")
-            yield Static(
-                method.description + " · Your entries are saved as you work. Examples are optional.", classes="muted"
-            )
-            yield Input(
-                value=self.session.problem_statement,
-                placeholder="What question are you planning around?",
-                id="planning-question",
-            )
-            yield Static(
-                "Planning question · Define the decision or uncertainty. Why: keeps this analysis anchored.",
-                classes="muted",
-            )
-            for field in schema_for(method.id):
-                yield from self.render_field(field, (field.key,))
-            with Horizontal(classes="actions"):
-                yield Button("Save & calculate  Ctrl+S", id="form-save", variant="primary")
-                yield Button("Load example", id="load-example")
-                yield Button("Advanced JSON  F6", id="advanced")
-                yield Button("Project", id="project")
-            yield Input(placeholder="Export path: ~/decision.md or ~/decision.json", id="form-export-path")
-            yield Button("Export  Ctrl+E", id="form-export")
-            yield Static("", id="form-error", classes="muted")
-            yield Static("", id="form-results", classes="muted", markup=False)
-            yield Static("AI is optional · suggestions are never saved without Accept.", classes="muted")
-            yield Static("", id="form-ai-status", classes="muted")
-            yield TextArea(id="form-preview")
-            with Horizontal(classes="actions"):
-                yield Button("Accept edited text", id="form-accept")
-                yield Button("Dismiss", id="form-dismiss")
-                yield Button("Stop AI  Ctrl+G", id="form-stop")
-        yield Footer()
+        yield Label(f"{self.session.title} · {method.name}", classes="hero")
+        yield Static(
+            method.description + " · Your entries are saved as you work. Examples are optional.", classes="muted"
+        )
+        yield Input(
+            value=self.session.problem_statement,
+            placeholder="What question are you planning around?",
+            id="planning-question",
+        )
+        yield Static(
+            "Planning question · Define the decision or uncertainty. Why: keeps this analysis anchored.",
+            classes="muted",
+        )
+        for field in schema_for(method.id):
+            yield from self.render_field(field, (field.key,))
+        with Horizontal(classes="actions"):
+            yield Button("Save & calculate  Ctrl+S", id="form-save", variant="primary")
+            yield Button("Load example", id="load-example")
+            yield Button("Advanced JSON  F6", id="advanced")
+            yield Button("Project", id="project")
+        yield Input(placeholder="Export path: ~/decision.md or ~/decision.json", id="form-export-path")
+        yield Button("Export  Ctrl+E", id="form-export")
+        yield Static("", id="form-error", classes="muted")
+        yield Static("", id="form-results", classes="muted", markup=False)
+        yield Static("AI is optional · suggestions are never saved without Accept.", classes="muted")
+        yield Static("", id="form-ai-status", classes="muted")
+        yield TextArea(id="form-preview")
+        with Horizontal(classes="actions"):
+            yield Button("Accept edited text", id="form-accept")
+            yield Button("Dismiss", id="form-dismiss")
+            yield Button("Stop AI  Ctrl+G", id="form-stop")
+
+    async def recompose_fields(self) -> None:
+        await self.query_one(FormContents).recompose()
 
     def value_at(self, path: tuple[Any, ...]) -> Any:
         item: Any = self.draft
@@ -101,6 +132,7 @@ class FormScreen(Screen):
         if field.kind == "rows":
             group = f"group-{len(self.groups)}"
             self.groups[group] = path
+            self.group_specs[group] = field
             yield Label(field.label, classes="heading")
             yield Static(field.help + " Why: " + field.why, classes="muted")
             rows = value if isinstance(value, list) else []
@@ -110,7 +142,17 @@ class FormScreen(Screen):
                 label = str(row.get("name", row.get("label", ""))) if isinstance(row, dict) else str(row)
                 yield Label(f"{field.label} {index + 1}" + (f" · {label}" if label else ""), classes="heading")
                 for child in field.children:
-                    if isinstance(row, (int, float, str)) and child.key == "value":
+                    if child.show_for:
+                        if path == ("variables",) and isinstance(row, dict):
+                            owner = row.get("distribution")
+                        else:
+                            parent = self.value_at(path[:-1])
+                            owner = parent.get("type") if isinstance(parent, dict) else None
+                        if owner not in child.show_for:
+                            continue
+                    if child.key == "value" and child.kind == "conditional_node":
+                        child_path = (*path, index)
+                    elif isinstance(row, (int, float, str)) and child.key == "value":
                         child_path = (*path, index)
                     elif isinstance(row, list) and child.key == "value":
                         for j in range(len(row)):
@@ -131,11 +173,13 @@ class FormScreen(Screen):
                     else:
                         child_path = (*path, index, child.key)
                     yield from self.render_field(child, child_path)
+                if self.session.method_id == "monte_carlo" and path == ("variables",):
+                    yield Static("", id=f"monte-error-{index}", classes="muted")
                 with Horizontal(classes="actions"):
                     for action, text in (("up", "↑ Move up"), ("down", "↓ Move down"), ("remove", "Remove")):
                         yield Button(text, id=f"{group}-{action}-{index}")
             yield Button(f"Add {field.label.lower()} row", id=f"{group}-add")
-            if path == ("states",) or path == ("scenarios",):
+            if path in {("states",), ("scenarios",), ("hypotheses",)}:
                 yield Button("Update columns from these names", id="refresh-keyed-grid")
             if any(child.kind in {"text", "long_text"} for child in field.children):
                 yield Button("Suggest rows", id=f"suggest-rows-{group}")
@@ -165,6 +209,17 @@ class FormScreen(Screen):
                         self.extra_keys[ident] = (*path, key)
                         yield Button("Remove previous judgment", id=ident)
             return
+        if field.kind == "conditional_node":
+            yield Label(field.label, classes="heading")
+            yield Static(field.help + " Why: " + field.why, classes="muted")
+            node = value if isinstance(value, dict) else {}
+            if len(path) > 100:
+                yield Static("This tree is too deep to edit safely.", classes="muted")
+                return
+            for child in field.children or conditional_node_fields(self.session.method_id):
+                if not child.show_for or node.get("type") in child.show_for:
+                    yield from self.render_field(child, (*path, child.key))
+            return
         if field.kind == "object":
             yield Label(field.label, classes="heading")
             for child in field.children:
@@ -175,6 +230,10 @@ class FormScreen(Screen):
         yield Label(field.label, classes="heading")
         yield Static(field.help + " Why: " + field.why, classes="muted")
         current = "" if value is None else ("Yes" if value else "No") if isinstance(value, bool) else str(value)
+        if field.choices == ENUM_CHOICES[("forecasting", "outcome")]:
+            current = {None: "Unresolved", 0: "No", 1: "Yes"}.get(value, current)
+        if field.choices == ENUM_CHOICES[("causal_loop", "polarity")]:
+            current = {1: "Reinforcing (+1)", -1: "Balancing (-1)"}.get(value, current)
         if field.kind in {"choice", "reference"}:
             options = [("— Choose —", "")] + [(choice, choice) for choice in field.choices]
             if field.kind == "reference":
@@ -232,9 +291,21 @@ class FormScreen(Screen):
         if event.text_area.id in self.fields:
             self.change(event.text_area.id, event.text_area.text)
 
-    def on_select_changed(self, event: Select.Changed) -> None:
+    async def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id in self.fields:
+            path, _ = self.fields[event.select.id]
+            previous = self.value_at(path)
             self.change(event.select.id, "" if event.value is Select.BLANK else str(event.value))
+            changed_distribution = (
+                self.session.method_id == "monte_carlo"
+                and len(path) == 3
+                and path[0] == "variables"
+                and path[-1] == "distribution"
+            )
+            changed_node = self.session.method_id in {"decision_tree", "fault_tree"} and path[-1] == "type"
+            if (changed_distribution or changed_node) and self.value_at(path) != previous:
+                await self.recompose_fields()
+                self.update_monte_feedback()
 
     def change(self, ident: str, raw: str) -> None:
         path, field = self.fields[ident]
@@ -253,7 +324,7 @@ class FormScreen(Screen):
         ):
             return
         self.put(path, value)
-        if (path[0] == "states" and path[-1] == "name") or (path[0] == "scenarios" and len(path) == 2):
+        if (path[0] == "states" and path[-1] == "name") or (path[0] in {"scenarios", "hypotheses"} and len(path) == 2):
             if not value and previous:
                 self.pending_labels[path] = str(previous)
             elif value:
@@ -264,6 +335,15 @@ class FormScreen(Screen):
         self.session.method_state = deepcopy(self.draft)
         self.app.store.save(self.session, f"Updated {field.label}")
         self.preview_result()
+        self.update_monte_feedback()
+
+    def update_monte_feedback(self) -> None:
+        if self.session.method_id != "monte_carlo":
+            return
+        for index, row in enumerate(self.draft.get("variables", [])):
+            targets = self.query(f"#monte-error-{index}")
+            if targets:
+                targets.first().update(validate_monte_variable(row))
 
     def preview_result(self) -> None:
         method = METHODS[self.session.method_id]
@@ -286,6 +366,7 @@ class FormScreen(Screen):
 
     def on_mount(self) -> None:
         self.preview_result()
+        self.update_monte_feedback()
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         ident = event.button.id or ""
@@ -295,7 +376,7 @@ class FormScreen(Screen):
             action = parts[2]
             index = int(parts[3]) if len(parts) > 3 else None
             path = self.groups[group]
-            spec = next(field for field in self.lookup_schema() if field[0] == path)[1]
+            spec = self.group_specs[group]
             rows = self.value_at(path)
             rows = list(rows) if isinstance(rows, list) else []
             if action == "add":
@@ -306,6 +387,10 @@ class FormScreen(Screen):
                 )
                 if path[-1] == "scores":
                     row = [""] * len(self.draft.get("criteria", []))
+                if self.session.method_id == "monte_carlo" and path == ("variables",):
+                    row = {"name": "", "distribution": "", "coefficient": ""}
+                if spec.children[0].kind == "conditional_node":
+                    row = {"type": ""}
                 rows.append(row)
             elif action == "remove":
                 rows.pop(index)
@@ -318,10 +403,11 @@ class FormScreen(Screen):
             normalize_ids(self.draft)
             self.session.method_state = deepcopy(self.draft)
             self.app.store.save(self.session, f"Changed {title(str(path[-1]))} rows")
-            await self.recompose()
+            await self.recompose_fields()
             self.preview_result()
+            self.update_monte_feedback()
         elif ident == "refresh-keyed-grid":
-            await self.recompose()
+            await self.recompose_fields()
         elif ident in self.extra_keys:
             path = self.extra_keys[ident]
             values = self.value_at(path[:-1])
@@ -329,14 +415,14 @@ class FormScreen(Screen):
                 del values[path[-1]]  # explicit user action; never discard a judgment during a rename
                 self.session.method_state = deepcopy(self.draft)
                 self.app.store.save(self.session, "Removed prior keyed judgment by request")
-                await self.recompose()
+                await self.recompose_fields()
         elif ident == "form-save":
             self.action_save()
         elif ident == "load-example":
             self.draft = {**self.draft, **draft_from_example(self.session.method_id)}
             self.session.method_state = deepcopy(self.draft)
             self.app.store.save(self.session, "Loaded illustrative example by request")
-            await self.recompose()
+            await self.recompose_fields()
             self.preview_result()
         elif ident == "advanced":
             self.action_advanced()
@@ -373,6 +459,11 @@ class FormScreen(Screen):
         return result
 
     def action_save(self) -> None:
+        if self.session.method_id == "monte_carlo":
+            for index, row in enumerate(self.draft.get("variables", []), 1):
+                if issue := validate_monte_variable(row):
+                    self.query_one("#form-error", Static).update(f"Variable {index}: {issue}")
+                    return
         if self.invalid_fields:
             self.query_one("#form-error", Static).update("Correct the highlighted entries before saving.")
             return
@@ -466,7 +557,7 @@ class FormScreen(Screen):
                 widget.value = text
         elif self.ai_group and self.ai_group in self.groups:
             path = self.groups[self.ai_group]
-            spec = next(field for field_path, field in self.lookup_schema() if field_path == path)
+            spec = self.group_specs[self.ai_group]
             child = next((child for child in spec.children if child.kind in {"text", "long_text"}), None)
             if child is None:
                 return
@@ -483,7 +574,7 @@ class FormScreen(Screen):
             normalize_ids(self.draft)
             self.session.method_state = deepcopy(self.draft)
             self.app.store.save(self.session, "Accepted edited text suggestions")
-            self.run_worker(self.recompose())
+            self.run_worker(self.recompose_fields())
         else:
             return
         self.ai_target = self.ai_group = None

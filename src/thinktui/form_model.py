@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from copy import deepcopy
 from dataclasses import dataclass
@@ -22,12 +23,15 @@ class FormField(Field):
     choices: tuple[str, ...] = ()
     reference: str = ""
     children: tuple[FormField, ...] = ()
+    show_for: tuple[str, ...] = ()  # visible only for these distribution choices
 
 
 KEYED_GRIDS = {
     ("value_of_information", "actions.payoffs"): "states",
     ("value_of_information", "signals.likelihoods"): "states",
     ("strategy_stress", "strategies.scores"): "scenarios",
+    ("evidence_matrix", "evidence.ratings"): "hypotheses",
+    ("ach", "evidence.ratings"): "hypotheses",
 }
 
 CHOICES = {
@@ -35,13 +39,25 @@ CHOICES = {
     "rating": ("++", "+", "0", "-", "--", "?"),
     "operation": ("product", "sum"),
 }
+MONTE_FIELDS = {
+    "uniform": ("min", "max"),
+    "triangular": ("min", "mode", "max"),
+    "normal": ("mean", "sd"),
+    "lognormal": ("mean", "sd"),
+    "discrete": ("values", "weights"),
+    "samples": ("values",),
+}
+ENUM_CHOICES = {
+    ("monte_carlo", "distribution"): tuple(MONTE_FIELDS),
+    ("decision_tree", "type"): ("outcome", "chance", "decision"),
+    ("fault_tree", "type"): ("event", "AND", "OR"),
+    ("forecasting", "outcome"): ("Unresolved", "No", "Yes"),
+    ("causal_loop", "polarity"): ("Reinforcing (+1)", "Balancing (-1)"),
+}
 KINDS = {
     "objectives": ("fundamental", "means"),
     "value_focused": ("fundamental", "means"),
     "hypothesis_tree": ("hypothesis", "test"),
-    "decision_tree": ("chance", "decision"),
-    "fault_tree": ("AND", "OR"),
-    "monte_carlo": ("normal", "lognormal", "uniform", "triangular"),
 }
 BOUNDS = {
     "confidence": (0, 100),
@@ -76,12 +92,204 @@ def slug(label: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", label.casefold()).strip("-") or "item"
 
 
+def monte_variable_fields() -> tuple[FormField, ...]:
+    """One declarative union of distribution inputs; the form only shows active fields."""
+    shared = (
+        FormField("name", "Variable name", help="Name this uncertain input.", why="Names identify model terms."),
+        FormField(
+            "distribution",
+            "Distribution",
+            kind="choice",
+            choices=ENUM_CHOICES[("monte_carlo", "distribution")],
+            help="Choose the shape of uncertainty.",
+            why="The chosen distribution determines required judgments.",
+        ),
+        FormField(
+            "coefficient",
+            "Coefficient",
+            kind="float",
+            help="Enter your multiplier (may be negative).",
+            why="Multiplies this variable in the linear model.",
+        ),
+    )
+    scalars = tuple(
+        FormField(
+            key,
+            title(key),
+            kind="float",
+            minimum=0 if key == "sd" else None,
+            show_for=tuple(kind for kind, fields in MONTE_FIELDS.items() if key in fields),
+            help="Enter your own " + ("nonnegative standard deviation" if key == "sd" else title(key).lower()) + ".",
+            why="Defines the spread and center of this distribution.",
+        )
+        for key in ("min", "mode", "max", "mean", "sd")
+    )
+    groups = tuple(
+        FormField(
+            key,
+            title(key),
+            kind="rows",
+            show_for=tuple(kind for kind, fields in MONTE_FIELDS.items() if key in fields),
+            children=(
+                FormField(
+                    "value",
+                    "Weight" if key == "weights" else "Value",
+                    kind="float",
+                    minimum=0 if key == "weights" else None,
+                    help="Enter your own " + ("nonnegative weight" if key == "weights" else "numeric outcome") + ".",
+                    why="These numbers define your empirical distribution.",
+                ),
+            ),
+            help="Add one numeric " + ("weight per value" if key == "weights" else "value per row") + ".",
+            why="All values and weights are user supplied.",
+        )
+        for key in ("values", "weights")
+    )
+    return (*shared, *scalars, *groups)
+
+
+def validate_monte_variable(row: dict) -> str:
+    """Cheap, plain-English shape check; never run the simulation while typing."""
+    kind = row.get("distribution")
+    if kind not in {"discrete", "samples"}:
+        return ""
+    values = row.get("values", [])
+    if not isinstance(values, list) or not values:
+        return "Add at least one numeric value."
+    if any(type(value) not in (int, float) or not math.isfinite(value) for value in values):
+        return "Each value must be a finite number you enter."
+    if kind == "discrete":
+        weights = row.get("weights", [])
+        if not isinstance(weights, list) or len(weights) != len(values):
+            return "Add exactly one weight for each value."
+        if any(type(weight) not in (int, float) or not math.isfinite(weight) or weight < 0 for weight in weights):
+            return "Weights must be finite, nonnegative numbers you enter."
+        if sum(weights) <= 0:
+            return "At least one weight must be greater than zero."
+    return ""
+
+
+def conditional_node_fields(method_id: str) -> tuple[FormField, ...]:
+    """Fields for every accepted decision/fault-tree node variant, not just an example branch."""
+    if method_id == "decision_tree":
+        return (
+            FormField(
+                "type",
+                "Node type",
+                kind="choice",
+                choices=ENUM_CHOICES[(method_id, "type")],
+                help="Choose an outcome, chance, or decision node.",
+                why="The node type determines which inputs apply.",
+            ),
+            FormField(
+                "value",
+                "Outcome value",
+                kind="float",
+                show_for=("outcome",),
+                help="Enter the payoff of this outcome.",
+                why="This value enters the rollback calculation.",
+            ),
+            FormField(
+                "branches",
+                "Branches",
+                kind="rows",
+                show_for=("chance", "decision"),
+                help="Add each possible branch.",
+                why="Branches are compared or probability-weighted.",
+                children=(
+                    FormField("name", "Branch name", help="Name this branch.", why="Identifies the option or outcome."),
+                    FormField(
+                        "probability",
+                        "Your probability (0–1)",
+                        kind="float",
+                        minimum=0,
+                        maximum=1,
+                        show_for=("chance",),
+                        help="Enter your chance judgment.",
+                        why="Chance branches must sum to one.",
+                    ),
+                    FormField(
+                        "node",
+                        "Next node",
+                        kind="conditional_node",
+                        help="Describe what happens next.",
+                        why="Each branch needs a result.",
+                    ),
+                ),
+            ),
+        )
+    if method_id == "fault_tree":
+        return (
+            FormField(
+                "type",
+                "Node type",
+                kind="choice",
+                choices=ENUM_CHOICES[(method_id, "type")],
+                help="Choose a basic event or AND/OR gate.",
+                why="Gate type determines probability combination.",
+            ),
+            FormField(
+                "name",
+                "Basic event",
+                show_for=("event",),
+                help="Name the basic event.",
+                why="Identifies the source of risk.",
+            ),
+            FormField(
+                "probability",
+                "Your probability (0–1)",
+                kind="float",
+                minimum=0,
+                maximum=1,
+                show_for=("event",),
+                help="Enter your event probability.",
+                why="Feeds the fault-tree calculation.",
+            ),
+            FormField(
+                "independent",
+                "Independent events?",
+                kind="choice",
+                choices=("Yes", "No"),
+                show_for=("AND", "OR"),
+                help="Confirm the events are independent.",
+                why="The gate calculation assumes independence.",
+            ),
+            FormField(
+                "children",
+                "Gate events",
+                kind="rows",
+                show_for=("AND", "OR"),
+                help="Add two or more child events.",
+                why="The gate combines their probabilities.",
+                children=(
+                    FormField(
+                        "value",
+                        "Child node",
+                        kind="conditional_node",
+                        help="Describe a child event or gate.",
+                        why="Each child contributes to the gate.",
+                    ),
+                ),
+            ),
+        )
+    raise ValueError("No conditional node schema for this method")
+
+
 def schema_for(method_id: str) -> tuple[FormField, ...]:
     """All worksheet methods use their published example *shape*, not its contents."""
     example = METHODS[method_id].example
 
     def build(key: str, value: Any, path: str) -> FormField:
         label = title(key)
+        if method_id in {"decision_tree", "fault_tree"} and path == "tree":
+            return FormField(
+                key,
+                label,
+                kind="conditional_node",
+                children=conditional_node_fields(method_id),
+                help="Describe the first node.",
+                why="The tree is calculated from its branches.",
+            )
         why = f"{label} is used to check or interpret this analysis."
         help_text = f"Describe {label.lower()} in your own words."
         if key == "id":
@@ -97,7 +305,9 @@ def schema_for(method_id: str) -> tuple[FormField, ...]:
             )
         if isinstance(value, list):
             sample = value[0] if value else ""
-            if isinstance(sample, dict):
+            if method_id == "monte_carlo" and path == "variables":
+                children = monte_variable_fields()
+            elif isinstance(sample, dict):
                 children = tuple(build(k, v, f"{path}.{k}") for k, v in sample.items())
             elif isinstance(sample, list):
                 children = (FormField("value", "Value", kind="text", help="Enter a value.", why=why),)
@@ -128,6 +338,17 @@ def schema_for(method_id: str) -> tuple[FormField, ...]:
                         help="Enter your conditional likelihood, 0–1.",
                         why="Likelihoods determine how the signal updates each state.",
                     )
+                elif key == "ratings":
+                    cell = FormField(
+                        "value",
+                        "Consistency",
+                        kind="choice",
+                        choices=("+", "-", "0", "?")
+                        if method_id == "evidence_matrix"
+                        else ("++", "+", "0", "-", "--", "?"),
+                        help="Choose how this evidence relates to the hypothesis.",
+                        why="Contradictions are surfaced for review, not inferred by AI.",
+                    )
                 elif key == "scores":
                     cell = FormField(
                         "value",
@@ -155,7 +376,11 @@ def schema_for(method_id: str) -> tuple[FormField, ...]:
                 help=help_text,
                 why=why,
             )
-        choices = KINDS[method_id] if key == "kind" and method_id in KINDS else CHOICES.get(key, ())
+        choices = (
+            KINDS[method_id]
+            if key == "kind" and method_id in KINDS
+            else ENUM_CHOICES.get((method_id, key), CHOICES.get(key, ()))
+        )
         if method_id == "bradley_terry" and key == "outcome":
             choices = ("a_wins", "b_wins", "tie")
         if key == "direction" and method_id == "signposts":
@@ -199,6 +424,8 @@ def blank(field: FormField) -> Any:
         return []
     if field.kind == "keyed_grid":
         return {}
+    if field.kind == "conditional_node":
+        return {"type": ""}
     if field.kind == "object":
         return {child.key: blank(child) for child in field.children if child.kind != "generated"}
     return ""
@@ -236,6 +463,10 @@ def parse(field: FormField, raw: str) -> Any:
         raise ValueError(f"{field.label}: choose {', '.join(field.choices)}")
     if field.choices == ("Yes", "No"):
         return value == "Yes"
+    if field.choices == ENUM_CHOICES[("forecasting", "outcome")]:
+        return {"Unresolved": None, "No": 0, "Yes": 1}[value]
+    if field.choices == ENUM_CHOICES[("causal_loop", "polarity")]:
+        return {"Reinforcing (+1)": 1, "Balancing (-1)": -1}[value]
     return value
 
 

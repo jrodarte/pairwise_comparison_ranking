@@ -5,7 +5,7 @@ Captured from a running Textual pilot at 110 × 42 cells, AI disabled, using bla
 - [Objectives Hierarchy](objectives.svg)
 - [Value-Focused Thinking](value_focused.svg)
 - [Key Assumptions Check](assumptions.svg)
-- [Decision Matrix](matrix.svg)
+- [Decision Matrix](matrix.svg) · [scores grid](matrix_scores.svg)
 - [Premortem](premortem.svg)
 - [Backcasting](backcasting.svg)
 

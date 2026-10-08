@@ -105,6 +105,27 @@ def test_numeric_and_date_validation():
 
 
 @pytest.mark.asyncio
+async def test_matrix_scores_render_as_rows_and_criteria_columns(tmp_path):
+    from textual.widgets import TextArea
+    from thinktui.guided_screen import GuidedScreen
+
+    store = Store(tmp_path / "matrix.db")
+    session = Session(store.new_project("Plan"), "matrix", "Options")
+    store.save(session)
+    app = ThinkApp(store=store)
+    async with app.run_test() as pilot:
+        app.open_session(session, guided=True)
+        await pilot.pause()
+        assert isinstance(app.screen, GuidedScreen)
+        app.screen.query_one("#field-alternatives", TextArea).load_text("Pilot\nNo change")
+        await app.screen.action_next()
+        app.screen.query_one("#field-criteria", TextArea).load_text("Speed | 3 | benefit\nEffort | 2 | cost")
+        await app.screen.action_next()
+        assert len(app.screen.query("Input.matrix-grid-cell")) == 4
+        assert len(app.screen.query(".matrix-grid-row")) == 3  # heading and two alternatives
+
+
+@pytest.mark.asyncio
 async def test_issue_tree_enter_adds_child_and_shift_enter_sibling(tmp_path):
     store = Store(tmp_path / "tree.db")
     session = Session(store.new_project("Plan"), "issue_tree", "Questions")

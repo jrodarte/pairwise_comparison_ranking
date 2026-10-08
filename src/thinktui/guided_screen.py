@@ -59,12 +59,36 @@ class GuidedScreen(Screen):
                         classes="muted",
                     )
                     yield Button("Use these starting points", id="use-offer")
-            for field in step.fields:
-                yield Label(field.label, classes="heading")
-                if field.multiline:
-                    yield TextArea(field.value, id=f"field-{field.key}")
-                else:
-                    yield Input(value=field.value, placeholder=field.label, id=f"field-{field.key}")
+            if method.id == "matrix" and self.index == 2:
+                criteria = self.session.method_state.get("criteria", [])
+                alternatives = self.session.method_state.get("alternatives", [])
+                yield Static(
+                    "Scores grid · rows are options, columns are your criteria. Use Tab to move between cells.",
+                    classes="muted",
+                )
+                with Horizontal(classes="matrix-grid-row"):
+                    yield Label("Option", classes="matrix-grid-name")
+                    for criterion in criteria:
+                        yield Label(str(criterion["name"]), classes="matrix-grid-cell")
+                for i, alternative in enumerate(alternatives):
+                    with Horizontal(classes="matrix-grid-row"):
+                        yield Label(str(alternative["name"]), classes="matrix-grid-name")
+                        for j, criterion in enumerate(criteria):
+                            field = next(field for field in step.fields if field.key == f"score_{i}_{j}")
+                            yield Input(
+                                value=field.value,
+                                placeholder="0–10",
+                                id=f"field-{field.key}",
+                                classes="matrix-grid-cell",
+                                tooltip=f"{alternative['name']} · {criterion['name']}",
+                            )
+            else:
+                for field in step.fields:
+                    yield Label(field.label, classes="heading")
+                    if field.multiline:
+                        yield TextArea(field.value, id=f"field-{field.key}")
+                    else:
+                        yield Input(value=field.value, placeholder=field.label, id=f"field-{field.key}")
             if step.review:
                 try:
                     issues = method.validate(self.session.method_state)

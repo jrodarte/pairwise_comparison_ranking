@@ -32,6 +32,9 @@ class ThinkApp(App[None]):
     .muted { color: #aabccc; height: auto; margin-bottom: 1; }
     .actions { height: auto; margin: 1 0; }
     .actions Button { margin-right: 1; }
+    .matrix-grid-row { height: auto; min-height: 3; }
+    .matrix-grid-name { width: 22; height: auto; }
+    .matrix-grid-cell { width: 1fr; min-width: 12; height: auto; }
     Input, TextArea { background: #1b3042; border: tall #38576a; margin: 0 0 1 0; }
     Input:focus, TextArea:focus { border: tall #89bed7; }
     TextArea { height: 12; }

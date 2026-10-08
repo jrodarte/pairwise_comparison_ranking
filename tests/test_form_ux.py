@@ -99,14 +99,126 @@ def test_numeric_and_date_validation():
     assert parse(field, "2030-01-01") == "2030-01-01"
     assert parse(schema_for("objectives")[0].children[1], "") is None
     assert schema_for("hypothesis_tree")[1].children[-1].choices == ("hypothesis", "test")
+    assert schema_for("bradley_terry")[1].children[-1].choices == ("a_wins", "b_wins", "tie")
+    assert schema_for("bradley_terry")[1].children[-1].kind == "choice"
     assert parse(schema_for("assumption_mapping")[0].children[1], "0.3") == 0.3
     with pytest.raises(ValueError):
         parse(schema_for("assumption_mapping")[0].children[1], "30")
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "method_id, rows, scalars",
+    [
+        (
+            "value_of_information",
+            {
+                "states": [{"name": "Rain", "probability": "0.6"}, {"name": "Sun", "probability": "0.4"}],
+                "actions": [
+                    {"name": "Coat", "payoffs": {"Rain": "10", "Sun": "-2"}},
+                    {"name": "Umbrella", "payoffs": {"Rain": "8", "Sun": "3"}},
+                ],
+                "signals": [
+                    {"name": "Cloudy", "likelihoods": {"Rain": "0.8", "Sun": "0.3"}},
+                    {"name": "Clear", "likelihoods": {"Rain": "0.2", "Sun": "0.7"}},
+                ],
+            },
+            {"research_cost": "1"},
+        ),
+        (
+            "strategy_stress",
+            {
+                "scenarios": ["Recession", "Growth"],
+                "strategies": [
+                    {"name": "Reserve", "scores": {"Recession": "8", "Growth": "5"}},
+                    {"name": "Invest", "scores": {"Recession": "2", "Growth": "9"}},
+                ],
+            },
+            {},
+        ),
+    ],
+)
+async def test_dynamic_keyed_grids_complete_without_json(tmp_path, method_id, rows, scalars):
+    store = Store(tmp_path / f"{method_id}.db")
+    session = Session(store.new_project("Grid"), method_id, "Own labels")
+    store.save(session)
+    app = ThinkApp(store=store)
+    async with app.run_test() as pilot:
+        app.open_session(session, guided=True)
+        await pilot.pause()
+        assert isinstance(app.screen, FormScreen)
+        for key, entries in rows.items():
+            group = next(ident for ident, path in app.screen.groups.items() if path == (key,))
+            for index, row in enumerate(entries):
+                app.screen.query_one(f"#{group}-add", Button).press()
+                await pilot.pause()
+                for name, value in row.items() if isinstance(row, dict) else [("value", row)]:
+                    if isinstance(value, dict):
+                        for column, judgment in value.items():
+                            path = (key, index, name, column)
+                            ident = next(i for i, (p, _) in app.screen.fields.items() if p == path)
+                            app.screen.change(ident, judgment)
+                    else:
+                        path = (key, index) if name == "value" else (key, index, name)
+                        ident = next(i for i, (p, _) in app.screen.fields.items() if p == path)
+                        app.screen.change(ident, value)
+        for key, raw in scalars.items():
+            ident = next(i for i, (p, _) in app.screen.fields.items() if p == (key,))
+            app.screen.change(ident, raw)
+        assert not METHODS[method_id].validate(session.method_state)
+        app.screen.action_save()
+        assert store.load(session.id).completed_at
+        source = "states" if method_id == "value_of_information" else "scenarios"
+        old, new = ("Rain", "Storm") if source == "states" else ("Recession", "Downturn")
+        source_path = (source, 0, "name") if source == "states" else (source, 0)
+        name_field = next(i for i, (p, _) in app.screen.fields.items() if p == source_path)
+        app.screen.change(name_field, new)
+        await app.screen.recompose()
+        state = store.load(session.id).method_state
+        dependent = ("actions", "payoffs") if source == "states" else ("strategies", "scores")
+        for row in state[dependent[0]]:
+            assert new in row[dependent[1]] and old not in row[dependent[1]]
+        assert not METHODS[method_id].validate(state)
+
+
+@pytest.mark.asyncio
+async def test_legacy_grid_rename_preserves_judgments_and_collision(tmp_path):
+    from copy import deepcopy
+
+    store = Store(tmp_path / "legacy-grid.db")
+    session = Session(
+        store.new_project("Old"),
+        "value_of_information",
+        "Legacy",
+        method_state=deepcopy(METHODS["value_of_information"].example),
+    )
+    store.save(session)
+    app = ThinkApp(store=store)
+    async with app.run_test() as pilot:
+        app.open_session(session, guided=True)
+        await pilot.pause()
+        screen = app.screen
+        ident = next(i for i, (p, _) in screen.fields.items() if p == ("states", 0, "name"))
+        editor = screen.query_one(f"#{ident}", Input)
+        editor.value = ""
+        editor.value = "Storm"
+        await pilot.pause()
+        assert session.method_state["actions"][0]["payoffs"]["Storm"] == 100
+        assert session.method_state["signals"][0]["likelihoods"]["Storm"] == 0.8
+        assert "Demand" not in session.method_state["actions"][0]["payoffs"]
+        await screen.recompose()
+        ident = next(i for i, (p, _) in screen.fields.items() if p == ("states", 0, "name"))
+        screen.query_one(f"#{ident}", Input).value = "No demand"  # never erase either judgment
+        await pilot.pause()
+        assert session.method_state["actions"][0]["payoffs"] == {"Storm": 100, "No demand": -50}
+        await screen.recompose()
+        assert any(path == ("actions", 0, "payoffs", "Storm") for path in screen.extra_keys.values())
+
+
+@pytest.mark.asyncio
 async def test_matrix_scores_render_as_rows_and_criteria_columns(tmp_path):
     from textual.widgets import TextArea
+
     from thinktui.guided_screen import GuidedScreen
 
     store = Store(tmp_path / "matrix.db")

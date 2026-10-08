@@ -24,6 +24,12 @@ class FormField(Field):
     children: tuple[FormField, ...] = ()
 
 
+KEYED_GRIDS = {
+    ("value_of_information", "actions.payoffs"): "states",
+    ("value_of_information", "signals.likelihoods"): "states",
+    ("strategy_stress", "strategies.scores"): "scenarios",
+}
+
 CHOICES = {
     "direction": ("benefit", "cost"),
     "rating": ("++", "+", "0", "-", "--", "?"),
@@ -101,6 +107,46 @@ def schema_for(method_id: str) -> tuple[FormField, ...]:
                 key, label, kind="rows", children=children, help=f"Add as many {label.lower()} as you need.", why=why
             )
         if isinstance(value, dict):
+            if (method_id, path) in KEYED_GRIDS:
+                sample = next(iter(value.values()))
+                cell = build(key, sample, path + ".value")
+                if key == "payoffs":
+                    cell = FormField(
+                        "value",
+                        "Payoff",
+                        kind="float",
+                        help="Enter your payoff for this state.",
+                        why="Payoffs determine expected value; losses may be negative.",
+                    )
+                if key == "likelihoods":
+                    cell = FormField(
+                        "value",
+                        "Likelihood",
+                        kind="float",
+                        minimum=0,
+                        maximum=1,
+                        help="Enter your conditional likelihood, 0–1.",
+                        why="Likelihoods determine how the signal updates each state.",
+                    )
+                elif key == "scores":
+                    cell = FormField(
+                        "value",
+                        "Score",
+                        kind="float",
+                        minimum=0,
+                        maximum=10,
+                        help="Enter your score, 0–10.",
+                        why="Scores show how the strategy performs in each scenario.",
+                    )
+                return FormField(
+                    key,
+                    label,
+                    kind="keyed_grid",
+                    reference=KEYED_GRIDS[(method_id, path)],
+                    children=(cell,),
+                    help="Enter one judgment for each named " + KEYED_GRIDS[(method_id, path)][:-1] + ".",
+                    why="Every named row needs its own user-supplied judgment.",
+                )
             return FormField(
                 key,
                 label,
@@ -110,6 +156,8 @@ def schema_for(method_id: str) -> tuple[FormField, ...]:
                 why=why,
             )
         choices = KINDS[method_id] if key == "kind" and method_id in KINDS else CHOICES.get(key, ())
+        if method_id == "bradley_terry" and key == "outcome":
+            choices = ("a_wins", "b_wins", "tie")
         if key == "direction" and method_id == "signposts":
             choices = ("above", "below")
         if choices or isinstance(value, bool):
@@ -149,6 +197,8 @@ def schema_for(method_id: str) -> tuple[FormField, ...]:
 def blank(field: FormField) -> Any:
     if field.kind == "rows":
         return []
+    if field.kind == "keyed_grid":
+        return {}
     if field.kind == "object":
         return {child.key: blank(child) for child in field.children if child.kind != "generated"}
     return ""
@@ -207,6 +257,24 @@ def normalize_ids(state: dict) -> dict:
         node["id"] = candidate
         used.add(candidate)
     return state
+
+
+def rename_grid_label(state: dict, method_id: str, source: str, old: str, new: str) -> None:
+    """Carry existing judgments through a label edit without overwriting collisions.
+
+    The unused key remains visible in the form when a rename collides, so a human
+    can resolve it instead of silently losing a score.
+    """
+    if not old or not new or old == new:
+        return
+    for (method, path), linked in KEYED_GRIDS.items():
+        if method != method_id or linked != source:
+            continue
+        group, key = path.split(".")
+        for row in state.get(group, []):
+            values = row.get(key) if isinstance(row, dict) else None
+            if isinstance(values, dict) and old in values and new not in values:
+                values[new] = values.pop(old)
 
 
 def draft_from_example(method_id: str) -> dict:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -14,7 +15,7 @@ from textual.widgets import Button, Footer, Header, Input, Label, Select, Static
 
 from .ai import AIRequest, connect, context_for, describe, is_local, selected_provider, visible_text
 from .core import METHODS, Session, timestamp
-from .form_model import FormField, blank, draft_from_example, normalize_ids, parse, schema_for, title
+from .form_model import FormField, blank, draft_from_example, normalize_ids, parse, rename_grid_label, schema_for, title
 from .reports import export
 
 
@@ -33,6 +34,8 @@ class FormScreen(Screen):
         self.draft = deepcopy(session.method_state)
         self.fields: dict[str, tuple[tuple[Any, ...], FormField]] = {}
         self.groups: dict[str, tuple[Any, ...]] = {}
+        self.extra_keys: dict[str, tuple[Any, ...]] = {}
+        self.pending_labels: dict[tuple[Any, ...], str] = {}
         self.ai_target: str | None = None
         self.ai_group: str | None = None
         self.ai_partial = ""
@@ -44,6 +47,7 @@ class FormScreen(Screen):
         method = METHODS[self.session.method_id]
         self.fields = {}
         self.groups = {}
+        self.extra_keys = {}
         with VerticalScroll(classes="page"):
             yield Label(f"{self.session.title} · {method.name}", classes="hero")
             yield Static(
@@ -130,8 +134,35 @@ class FormScreen(Screen):
                     for action, text in (("up", "↑ Move up"), ("down", "↓ Move down"), ("remove", "Remove")):
                         yield Button(text, id=f"{group}-{action}-{index}")
             yield Button(f"Add {field.label.lower()} row", id=f"{group}-add")
+            if path == ("states",) or path == ("scenarios",):
+                yield Button("Update columns from these names", id="refresh-keyed-grid")
             if any(child.kind in {"text", "long_text"} for child in field.children):
                 yield Button("Suggest rows", id=f"suggest-rows-{group}")
+            return
+        if field.kind == "keyed_grid":
+            sources = self.draft.get(field.reference, [])
+            labels = list(
+                dict.fromkeys(
+                    str(row.get("name", "")).strip() if isinstance(row, dict) else str(row).strip()
+                    for row in sources
+                    if isinstance(row, (str, dict))
+                )
+            )
+            labels = [label for label in labels if label]
+            values = value if isinstance(value, dict) else {}
+            extras = [key for key in values if key not in labels]
+            yield Label(field.label + " · " + " × ".join(labels), classes="heading")
+            yield Static(field.help + " Why: " + field.why, classes="muted")
+            if not labels and not extras:
+                yield Static("Name your " + field.reference + " first, then enter your own judgments.", classes="muted")
+            with Horizontal(classes="keyed-grid-row"):
+                for key in [*labels, *extras]:
+                    cell = replace(field.children[0], label=key + (" · previous name" if key in extras else ""))
+                    yield from self.render_field(cell, (*path, key))
+                    if key in extras:
+                        ident = f"extra-key-{len(self.extra_keys)}"
+                        self.extra_keys[ident] = (*path, key)
+                        yield Button("Remove previous judgment", id=ident)
             return
         if field.kind == "object":
             yield Label(field.label, classes="heading")
@@ -214,7 +245,15 @@ class FormScreen(Screen):
             return
         self.invalid_fields.discard(path)
         self.query_one(f"#error-{ident}", Static).update("")
+        previous = self.value_at(path)
         self.put(path, value)
+        if (path[0] == "states" and path[-1] == "name") or (path[0] == "scenarios" and len(path) == 2):
+            if not value and previous:
+                self.pending_labels[path] = str(previous)
+            elif value:
+                old = str(previous or self.pending_labels.get(path, ""))
+                rename_grid_label(self.draft, self.session.method_id, str(path[0]), old, str(value))
+                self.pending_labels.pop(path, None)
         normalize_ids(self.draft)
         self.session.method_state = deepcopy(self.draft)
         self.app.store.save(self.session, f"Updated {field.label}")
@@ -269,11 +308,22 @@ class FormScreen(Screen):
                 if 0 <= other < len(rows):
                     rows[index], rows[other] = rows[other], rows[index]
             self.put(path, rows)
+            self.pending_labels.clear()  # row indices changed; never reuse a stale rename target
             normalize_ids(self.draft)
             self.session.method_state = deepcopy(self.draft)
             self.app.store.save(self.session, f"Changed {title(str(path[-1]))} rows")
             await self.recompose()
             self.preview_result()
+        elif ident == "refresh-keyed-grid":
+            await self.recompose()
+        elif ident in self.extra_keys:
+            path = self.extra_keys[ident]
+            values = self.value_at(path[:-1])
+            if isinstance(values, dict):
+                del values[path[-1]]  # explicit user action; never discard a judgment during a rename
+                self.session.method_state = deepcopy(self.draft)
+                self.app.store.save(self.session, "Removed prior keyed judgment by request")
+                await self.recompose()
         elif ident == "form-save":
             self.action_save()
         elif ident == "load-example":

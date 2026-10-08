@@ -641,6 +641,7 @@ class FormScreen(Screen):
             return
         self.ai_partial = ""
         self.ai_ready = False
+        self.ai_destination = ""
         self.query_one("#form-preview", TextArea).load_text("")
         self.query_one("#form-ai-status", Static).update(
             "Sharing: method, problem, objective, assumptions, full method state · connecting to AI… Ctrl+G stops."
@@ -653,7 +654,11 @@ class FormScreen(Screen):
         def update(text: str) -> None:
             self.ai_partial = text
             self.query_one("#form-preview", TextArea).load_text(text)
-            status.update(f"AI suggestion streaming · {len(text.split())} words · Ctrl+G stops")
+            status.update(f"{self.ai_destination} · AI suggestion streaming · {len(text.split())} words · Ctrl+G stops")
+
+        def start(message: str) -> None:
+            self.ai_destination = message
+            status.update(message)
 
         try:
             answer, provider = await stream_text_draft(
@@ -663,11 +668,11 @@ class FormScreen(Screen):
                 rows,
                 update,
                 connect_fn=connect,
-                on_start=lambda message: status.update(message),
+                on_start=start,
             )
             self.query_one("#form-preview", TextArea).load_text(answer)
             self.ai_ready = True
-            status.update(f"{provider} · edit, Accept or Dismiss. Not saved.")
+            status.update(f"{self.ai_destination}\n{provider} · edit, Accept or Dismiss. Not saved.")
         except ValueError as exc:
             status.update(str(exc))
         except (RuntimeError, KeyError) as exc:

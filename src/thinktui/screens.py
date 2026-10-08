@@ -45,6 +45,7 @@ from .ai import (
     key_status,
     parse_json_object,
     pick_ollama_model,
+    public_error,
     remote_consent,
     selected_provider,
     sharing_destination,
@@ -1863,22 +1864,23 @@ class Workspace(FieldHelpMixin, Base):
                 return
             label = describe(config)
             self.notify(f"Asking {label}…", timeout=3)
+            disclosure = f"{sharing_destination(config)} · Sharing: method, problem, objective, assumptions, method state (not notes or history)."
+            response.update(disclosure)
             status.set_phase("checking model", label)
             status.set_phase(await provider.preparing_note() or "waiting for first response")
-            response.update(
-                f"{sharing_destination(config)} · Sharing: method, problem, objective, assumptions, method state (not notes or history)."
-            )
             async for chunk in provider.stream(AIRequest(question, context_for(self.workbench.session))):
                 self.ai_partial += chunk
                 words = len(visible_text(self.ai_partial).split())
                 status.set_phase(f"receiving answer · {words} words")
                 if mode != "suggest":
                     response.update(
-                        "AI suggestion (streaming · not saved):\n" + text_only(visible_text(self.ai_partial))
+                        disclosure
+                        + "\nAI suggestion (streaming · not saved):\n"
+                        + text_only(visible_text(self.ai_partial))
                     )
         except (RuntimeError, KeyError) as exc:
             status.finish("✗ AI request failed")
-            response.update(f"AI unavailable: {exc}. Your analysis is preserved.")
+            response.update(f"AI unavailable: {public_error(exc)}. Your analysis is preserved.")
             return
         answer = visible_text(self.ai_partial).strip()
         if mode == "suggest":
@@ -1895,13 +1897,15 @@ class Workspace(FieldHelpMixin, Base):
                 return
             self.query_one("#suggestion", Input).value = statement
             status.finish(f"✓ Suggestion received from {label}")
-            response.update("AI-suggested only · edit, accept or dismiss below. Not yet part of analysis.")
+            response.update(
+                disclosure + "\nAI-suggested only · edit, accept or dismiss below. Not yet part of analysis."
+            )
         elif not answer:
             status.finish(f"✗ {label} returned an empty answer")
             response.update("Your analysis is preserved.")
         else:
             status.finish(f"✓ Answer received from {label}")
-            response.update("AI suggestion (not saved or accepted):\n" + text_only(answer))
+            response.update(disclosure + "\nAI suggestion (not saved or accepted):\n" + text_only(answer))
 
     def action_back(self) -> None:
         self.flush_journal()

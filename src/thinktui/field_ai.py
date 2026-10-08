@@ -83,6 +83,7 @@ class FieldHelpMixin:
         self._field_help_rows = rows
         self._field_help_ready = False
         self._field_help_partial = ""
+        self._field_help_destination = ""
         self.query_one("#field-help-preview", TextArea).load_text("")
         self.query_one("#field-help-status", Static).update(
             "Sharing: method, problem, objective, assumptions, full method state · connecting to AI… Ctrl+G stops."
@@ -94,8 +95,12 @@ class FieldHelpMixin:
             self._field_help_partial = text
             self.query_one("#field-help-preview", TextArea).load_text(text)
             self.query_one("#field-help-status", Static).update(
-                f"AI suggestion streaming · {len(text.split())} words · not saved · Ctrl+G stops"
+                f"{self._field_help_destination} · AI suggestion streaming · {len(text.split())} words · not saved · Ctrl+G stops"
             )
+
+        def start(message: str) -> None:
+            self._field_help_destination = message
+            self.query_one("#field-help-status", Static).update(message)
 
         try:
             answer, provider = await stream_text_draft(
@@ -104,11 +109,13 @@ class FieldHelpMixin:
                 label,
                 self._field_help_rows,
                 update,
-                on_start=lambda message: self.query_one("#field-help-status", Static).update(message),
+                on_start=start,
             )
             self.query_one("#field-help-preview", TextArea).load_text(answer)
             self._field_help_ready = True
-            self.query_one("#field-help-status", Static).update(f"{provider} · edit, Accept or Dismiss. Not saved.")
+            self.query_one("#field-help-status", Static).update(
+                f"{self._field_help_destination}\n{provider} · edit, Accept or Dismiss. Not saved."
+            )
         except ValueError as exc:
             self.query_one("#field-help-status", Static).update(str(exc))
         except (RuntimeError, KeyError) as exc:

@@ -9,7 +9,7 @@ import sys
 import pytest
 from textual.widgets import Button, DataTable, Input, Select, TextArea
 
-from thinktui.ai import ProviderConfig, remote_consent
+from thinktui.ai import ProviderConfig, public_error, remote_consent, sharing_destination
 from thinktui.app import ThinkApp
 from thinktui.core import Session
 from thinktui.guided_screen import GuidedScreen
@@ -337,6 +337,12 @@ def test_doctor_is_read_only_without_probes(tmp_path):
     assert "Schema version: 3" in run.stdout
     assert database.read_bytes() == before
     assert sorted(p.name for p in database.parent.iterdir()) == ["thinktui.db"]
+
+
+def test_disclosure_and_errors_never_echo_credentials():
+    config = ProviderConfig("openai", "https://user:secret@example.org/v1?api_key=secret", "model")
+    assert sharing_destination(config) == "REMOTE → OpenAI API (example.org)"
+    assert "secret" not in public_error(RuntimeError("provider leaked secret-token-123"))
 
 
 def test_consent_specific_destination_and_export_exclusive(tmp_path):

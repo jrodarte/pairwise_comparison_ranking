@@ -10,6 +10,7 @@ from textual.containers import Horizontal, VerticalScroll
 from textual.screen import Screen
 from textual.widgets import Button, Footer, Header, Input, Label, Select, Static, TextArea
 
+from .ai import AIRequest, connect, context_for, describe, is_local, selected_provider, visible_text
 from .core import METHODS, Session, timestamp
 from .form_model import FormField, blank, draft_from_example, normalize_ids, parse, schema_for, title
 
@@ -29,6 +30,8 @@ class FormScreen(Screen):
         self.fields: dict[str, tuple[tuple[Any, ...], FormField]] = {}
         self.groups: dict[str, tuple[Any, ...]] = {}
         self.ai_target: str | None = None
+        self.ai_group: str | None = None
+        self.ai_partial = ""
         self.invalid_fields: set[tuple[Any, ...]] = set()
 
     def compose(self) -> ComposeResult:
@@ -120,6 +123,8 @@ class FormScreen(Screen):
                     for action, text in (("up", "↑ Move up"), ("down", "↓ Move down"), ("remove", "Remove")):
                         yield Button(text, id=f"{group}-{action}-{index}")
             yield Button(f"Add {field.label.lower()} row", id=f"{group}-add")
+            if any(child.kind in {"text", "long_text"} for child in field.children):
+                yield Button("Suggest rows", id=f"suggest-rows-{group}")
             return
         if field.kind == "object":
             yield Label(field.label, classes="heading")
@@ -274,6 +279,8 @@ class FormScreen(Screen):
             self.action_advanced()
         elif ident == "project":
             self.action_project()
+        elif ident.startswith("suggest-rows-"):
+            self.suggest_rows(ident.removeprefix("suggest-rows-"))
         elif ident.startswith("suggest-"):
             self.suggest(ident.removeprefix("suggest-"))
         elif ident == "form-accept":
@@ -321,10 +328,97 @@ class FormScreen(Screen):
         self.app.show_project()
 
     def suggest(self, ident: str) -> None:
-        pass
+        if ident not in self.fields:
+            return
+        self.ai_target, self.ai_group = ident, None
+        self.request_ai(self.fields[ident][1].label, rows=False)
+
+    def suggest_rows(self, group: str) -> None:
+        if group not in self.groups:
+            return
+        self.ai_target, self.ai_group = None, group
+        self.request_ai(title(str(self.groups[group][-1])), rows=True)
+
+    def request_ai(self, label: str, *, rows: bool) -> None:
+        if selected_provider(self.app.store) == "off":
+            self.query_one("#form-ai-status", Static).update("AI is off. You can enter everything yourself.")
+            return
+        if any(w.group == "form-ai" and w.is_running for w in self.workers):
+            return
+        self.ai_partial = ""
+        self.query_one("#form-preview", TextArea).load_text("")
+        self.query_one("#form-ai-status", Static).update("Connecting to AI… Ctrl+G stops.")
+        self.run_worker(self.ask_ai(label, rows), group="form-ai", exclusive=True)
+
+    async def ask_ai(self, label: str, rows: bool) -> None:
+        status = self.query_one("#form-ai-status", Static)
+        try:
+            provider, config = await connect(self.app.store)
+            if not is_local(config) and self.app.store.setting("ai_consent") != "yes":
+                status.update("Review privacy and consent in Settings before sharing this analysis.")
+                return
+            prompt = (
+                f"Suggest {'a few distinct lines for' if rows else 'one short draft for'} {label}. "
+                "Return plain text only; no scores, weights, probabilities, confidence, impact, dates, "
+                "numeric judgments, invented evidence, or JSON. The user must review and accept it."
+            )
+            context = context_for(self.session)  # same whitelist as Challenge; never send notes or history
+            context["state"] = deepcopy(self.draft)
+            async for chunk in provider.stream(AIRequest(prompt, context)):
+                self.ai_partial += chunk
+                status.update(
+                    f"{describe(config)} · streaming {len(visible_text(self.ai_partial).split())} words · Ctrl+G stops"
+                )
+            answer = visible_text(self.ai_partial).strip()
+            if not answer or any(character.isdigit() for character in answer):
+                status.update("AI returned empty or numeric text. Nothing was changed.")
+                return
+            self.query_one("#form-preview", TextArea).load_text(answer)
+            status.update("AI draft received · edit, Accept or Dismiss. Not saved.")
+        except (RuntimeError, KeyError):
+            status.update("AI unavailable. Your analysis is preserved.")
 
     def accept(self) -> None:
-        pass
+        text = self.query_one("#form-preview", TextArea).text.strip()
+        if not text or any(character.isdigit() for character in text):
+            self.query_one("#form-ai-status", Static).update("Enter text only; numeric judgments are yours to supply.")
+            return
+        if self.ai_target and self.ai_target in self.fields:
+            ident = self.ai_target
+            self.change(ident, text)
+            widget = self.query_one(f"#{ident}")
+            if isinstance(widget, TextArea):
+                widget.load_text(text)
+            elif isinstance(widget, Input):
+                widget.value = text
+        elif self.ai_group and self.ai_group in self.groups:
+            path = self.groups[self.ai_group]
+            spec = next(field for field_path, field in self.lookup_schema() if field_path == path)
+            child = next((child for child in spec.children if child.kind in {"text", "long_text"}), None)
+            if child is None:
+                return
+            rows = list(self.value_at(path) or [])
+            for line in text.splitlines():
+                if line.strip():
+                    if child.key == "value":
+                        rows.append(line.strip())
+                    else:
+                        row = {field.key: blank(field) for field in spec.children if field.kind != "generated"}
+                        row[child.key] = line.strip()
+                        rows.append(row)
+            self.put(path, rows)
+            normalize_ids(self.draft)
+            self.session.method_state = deepcopy(self.draft)
+            self.app.store.save(self.session, "Accepted edited text suggestions")
+            self.run_worker(self.recompose())
+        else:
+            return
+        self.ai_target = self.ai_group = None
+        self.query_one("#form-preview", TextArea).load_text("")
+        self.query_one("#form-ai-status", Static).update("Accepted edited text; add your own judgments separately.")
 
     def action_stop_ai(self) -> None:
-        pass
+        if any(w.group == "form-ai" and w.is_running for w in self.workers):
+            self.workers.cancel_group(self, "form-ai")
+            self.query_one("#form-ai-status", Static).update("AI stopped · partial text was not accepted or saved.")
+            self.query_one("#form-preview", TextArea).load_text("")

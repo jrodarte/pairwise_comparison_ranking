@@ -31,6 +31,14 @@ from thinktui.storage import Store
         "8 out of 10",
         "October 2026",
         "2026-10-12",
+        "8/10 risk",
+        "0.7 probability",
+        "8 is the risk score",
+        "Probability of failure: 0.8",
+        "The option scored 8",
+        "We rate it 5/10",
+        "Probability of success is 0.7",
+        "We rate it 5",
     ],
 )
 def test_ai_generated_numeric_judgment_is_removed(judgment):
@@ -45,7 +53,8 @@ async def test_form_ai_stream_filters_numeric_prose_but_accepts_user_edited_text
     session = Session(store.new_project("Study"), "backcasting", "Future")
     store.save(session)
     fake = FakeAIProvider(
-        "Confidence is 30 percent\nRisk is 8\nRating is 4 out of 5\nDeadline is 12 October 2026\nPhase 2"
+        "8/10 risk\n0.7 probability\n8 is the risk score\nProbability of failure: 0.8\n"
+        "The option scored 8\nWe rate it 5/10\nPhase 2"
     )
 
     async def connect(_):
@@ -63,10 +72,10 @@ async def test_form_ai_stream_filters_numeric_prose_but_accepts_user_edited_text
         await screen.workers.wait_for_complete()
         assert screen.query_one("#form-preview", TextArea).text == "Phase 2"
         assert store.load(session.id).method_state == {}
-        screen.query_one("#form-preview", TextArea).load_text("Risk is 8 — my own wording")
+        screen.query_one("#form-preview", TextArea).load_text("8/10 risk — my own wording")
         screen.accept()
         await pilot.pause()
-        assert store.load(session.id).method_state["future_state"] == "Risk is 8 — my own wording"
+        assert store.load(session.id).method_state["future_state"] == "8/10 risk — my own wording"
     store.close()
 
 
@@ -76,7 +85,7 @@ async def test_guided_draft_filters_numeric_prose_and_preserves_user_edits(tmp_p
     store.set_setting("ai_provider", "ollama")
     session = Session(store.new_project("Study"), "matrix", "Options")
     store.save(session)
-    fake = FakeAIProvider("Risk is 8\nPhase 2\nDeadline is 12 October 2026\nQ3")
+    fake = FakeAIProvider("8/10 risk\nPhase 2\n0.7 probability\nQ3")
 
     async def connect(_):
         return fake, ProviderConfig("ollama", "http://localhost:11434", "fake")
@@ -109,7 +118,7 @@ async def test_assumption_suggestion_and_challenge_filter_numeric_prose(tmp_path
     store.set_setting("ai_provider", "ollama")
     session = Session(store.new_project("Study"), "assumptions", "Hypotheses")
     store.save(session)
-    fake = FakeAIProvider(json.dumps({"statement": "Risk is 8\nPhase 2"}))
+    fake = FakeAIProvider(json.dumps({"statement": "Probability of failure: 0.8\nPhase 2"}))
 
     async def connect(_):
         return fake, ProviderConfig("ollama", "http://localhost:11434", "fake")
@@ -128,13 +137,13 @@ async def test_assumption_suggestion_and_challenge_filter_numeric_prose(tmp_path
             screen.query_one("#ai-response", Static).content
         )
         assert store.load(session.id).method_state == {}
-        fake.answer = "Risk is 8\nRating is 4 out of 5\nDeadline is 12 October 2026\nReview in Q3"
+        fake.answer = "8 is the risk score\nThe option scored 8\nWe rate it 5/10\nReview in Q3"
         screen.query_one("#challenge", Button).press()
         await pilot.pause()
         await screen.workers.wait_for_complete()
         message = str(screen.query_one("#ai-response", Static).content)
         assert "Review in Q3" in message
-        assert all(judgment not in message for judgment in ("Risk is 8", "Rating is 4", "Deadline is 12"))
+        assert all(judgment not in message for judgment in ("risk score", "option scored 8", "rate it 5/10"))
         assert store.load(session.id).method_state == {}
     store.close()
 

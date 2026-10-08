@@ -25,10 +25,14 @@ from .ai import (
 from .core import Session
 
 _NUMBER = r"[-+]?\d+(?:\.\d+)?"
+_JUDGMENT = r"(?:score|weight|probability|confidence|rating|likelihood|impact|cost|risk|odds)"
 _MONTH = r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
 NUMERIC_JUDGMENT = re.compile(
-    rf"(?:\b(?:score|weight|probability|confidence|rating|likelihood|impact|cost|risk|date|deadline|odds)\b"
-    rf"(?:\s+(?:is|was|of|at|about|around|equals|to|as|rated|score|rating)){{0,3}}\s*[:=~]?\s*{_NUMBER}\b"
+    rf"(?:\b(?:{_JUDGMENT}|date|deadline)\b"
+    rf"(?:\s+(?:is|was|of|at|about|around|equals|to|as|rated|score|rating|failure|success|event|outcome|the|a|an|our|your|its|this)){{0,5}}\s*[:=~]?\s*{_NUMBER}\b"
+    rf"|(?<![A-Za-z]){_NUMBER}\b(?:\s+(?:is|was|the|a|an|of|for|as|at|about|around|estimated|your|its|this)){{0,4}}\s+{_JUDGMENT}\b"
+    rf"|\b(?:scored?|scores|scoring|rated?|rates|rating)\b(?:\s+(?:it|as|at|about|around|the|option)){{0,3}}\s+{_NUMBER}\b"
+    rf"|(?<![A-Za-z]){_NUMBER}\s*/\s*\d+\b"
     rf"|{_NUMBER}\s*(?:%|\bpercent(?:age)?\b|\bpct\b)"
     rf"|\b\d{{4}}[-/.]\d{{1,2}}[-/.]\d{{1,2}}\b|\b\d{{1,2}}[-/.]\d{{1,2}}[-/.]\d{{2,4}}\b"
     rf"|\b\d{{1,2}}(?:st|nd|rd|th)?\s+{_MONTH}\b(?:\s+\d{{4}}\b)?"

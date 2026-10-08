@@ -22,9 +22,7 @@ def validate_names(names: Sequence[str]) -> list[str]:
     return cleaned
 
 
-def create_project(
-    name: str, items: Sequence[Item], description: str = "", seed: int | None = None
-) -> Project:
+def create_project(name: str, items: Sequence[Item], description: str = "", seed: int | None = None) -> Project:
     """Create a complete, reproducibly shuffled schedule with independently flipped sides."""
     if not name.strip():
         raise ValueError("Enter a project name")
@@ -71,9 +69,7 @@ def decide(project: Project, pair: tuple[str, str], outcome: Outcome) -> None:
     project.comparisons[key] = comparison
     project.skipped = [value for value in project.skipped if value != key]
     project.pending = [value for value in project.pending if value != key]
-    project.undo_stack.append(
-        Change(key, previous.to_dict() if previous else None, comparison.to_dict())
-    )
+    project.undo_stack.append(Change(key, previous.to_dict() if previous else None, comparison.to_dict()))
     project.audit.append(
         {
             "action": "revise" if previous else "decide",
@@ -108,9 +104,7 @@ def undo(project: Project) -> Comparison | None:
     else:
         restored = Comparison.from_dict(change.before)
         project.comparisons[change.key] = restored
-    project.audit.append(
-        {"action": "undo", "pair": change.key, "reversed": change.after, "at": now()}
-    )
+    project.audit.append({"action": "undo", "pair": change.key, "reversed": change.after, "at": now()})
     project.modified_at = now()
     return restored
 
@@ -118,7 +112,6 @@ def undo(project: Project) -> Comparison | None:
 def duplicate(project: Project, name: str) -> Project:
     """Start a fresh schedule with copies of the items but no previous decisions."""
     items = [
-        Item(name=item.name, description=item.description, metadata=item.metadata.copy())
-        for item in project.items
+        Item(name=item.name, description=item.description, metadata=item.metadata.copy()) for item in project.items
     ]
     return create_project(name, items, project.description)

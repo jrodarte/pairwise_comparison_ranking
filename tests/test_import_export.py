@@ -27,9 +27,7 @@ def test_import_text_csv_json(tmp_path):
     item = import_items(csv_file, "title")[0]
     assert (item.name, item.description) == ("Other", "Details")
     data = tmp_path / "items.json"
-    data.write_text(
-        json.dumps({"items": ["One", {"name": "Two", "description": "More", "weight": 3}]})
-    )
+    data.write_text(json.dumps({"items": ["One", {"name": "Two", "description": "More", "weight": 3}]}))
     assert import_items(data)[1].metadata == {"weight": 3}
 
 

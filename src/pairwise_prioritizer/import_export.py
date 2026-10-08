@@ -95,8 +95,7 @@ def export_json(project: Project, results: list[RankingResult]) -> str:
     data = project.to_dict()
     data["application_version"] = __version__
     data["ranking_methodology"] = (
-        "L2-regularized Bradley–Terry; ties 0.5 each; "
-        "100 × logistic(strength), relative not percent"
+        "L2-regularized Bradley–Terry; ties 0.5 each; 100 × logistic(strength), relative not percent"
     )
     data["results"] = [
         {

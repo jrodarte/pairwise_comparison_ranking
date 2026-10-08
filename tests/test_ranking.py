@@ -7,10 +7,7 @@ from pairwise_prioritizer.ranking import BradleyTerry, matchup_groups
 
 def test_dominance_and_statistics():
     items = [Item(name=name) for name in "ABCD"]
-    matches = [
-        Comparison(a.id, b.id, Outcome.A_WINS, sequence=i)
-        for i, (a, b) in enumerate(combinations(items, 2), 1)
-    ]
+    matches = [Comparison(a.id, b.id, Outcome.A_WINS, sequence=i) for i, (a, b) in enumerate(combinations(items, 2), 1)]
     results = BradleyTerry().calculate(items, matches)
     assert [r.item.name for r in results] == list("ABCD")
     assert [(r.wins, r.losses, r.ties) for r in results] == [
@@ -43,9 +40,7 @@ def test_ties_and_cycle_are_finite():
 
 def test_unplayed_and_perfect_separation():
     items = [Item(name=str(n)) for n in range(30)]
-    matches = [
-        Comparison(items[0].id, item.id, Outcome.A_WINS, i) for i, item in enumerate(items[1:], 1)
-    ]
+    matches = [Comparison(items[0].id, item.id, Outcome.A_WINS, i) for i, item in enumerate(items[1:], 1)]
     rows = BradleyTerry().calculate(items, matches)
     assert rows[0].item.id == items[0].id
     assert all(math.isfinite(row.score) for row in rows)

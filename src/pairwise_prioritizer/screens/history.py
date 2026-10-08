@@ -115,9 +115,7 @@ class HistoryScreen(BaseScreen):
                 self.refresh_projects()
                 self.notify("Created a fresh ranking; previous decisions were not copied.")
 
-        self.app.push_screen(
-            PromptDialog("Name the new ranking", value=f"{project.name} (copy)"), copy
-        )
+        self.app.push_screen(PromptDialog("Name the new ranking", value=f"{project.name} (copy)"), copy)
 
     def action_export(self) -> None:
         project = self.selected()
@@ -130,17 +128,13 @@ class HistoryScreen(BaseScreen):
             from pathlib import Path
 
             try:
-                results = BradleyTerry().calculate(
-                    project.items, list(project.comparisons.values())
-                )
+                results = BradleyTerry().calculate(project.items, list(project.comparisons.values()))
                 export_project(project, results, Path(path))
                 self.notify(f"Exported to {path}")
             except (OSError, ValueError) as error:
                 self.notify(str(error), severity="error")
 
-        self.app.push_screen(
-            PromptDialog("Export to a file", "~/ranking.csv / .json / .md"), export
-        )
+        self.app.push_screen(PromptDialog("Export to a file", "~/ranking.csv / .json / .md"), export)
 
     def action_delete(self) -> None:
         project = self.selected()
@@ -153,9 +147,7 @@ class HistoryScreen(BaseScreen):
                 self.refresh_projects()
                 self.notify("Ranking deleted")
 
-        self.app.push_screen(
-            ConfirmDialog(f"Permanently delete ‘{project.name}’ and all of its decisions?"), remove
-        )
+        self.app.push_screen(ConfirmDialog(f"Permanently delete ‘{project.name}’ and all of its decisions?"), remove)
 
     def action_back(self) -> None:
         self.pairrank.home()

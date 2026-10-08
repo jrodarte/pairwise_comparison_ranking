@@ -150,16 +150,12 @@ class ResultsScreen(BaseScreen):
                 f"{row.win_percentage:.1f}",
                 key=row.item.id,
             )
-        self.query_one("#sort-label", Static).update(
-            f"SORTED BY {key.upper()}    ·    ↑↓ select    ·    Enter details"
-        )
+        self.query_one("#sort-label", Static).update(f"SORTED BY {key.upper()}    ·    ↑↓ select    ·    Enter details")
         self.query_one("#summary", Static).update(
             f"{project.name}    ·    {len(project.comparisons):,} / {project.total:,} "
             f"comparisons    ·    {project.status}    ·    scores are relative, not percentages"
         )
-        close = [
-            (a, b) for a, b in zip(results, results[1:], strict=False) if a.score - b.score < 1
-        ]
+        close = [(a, b) for a, b in zip(results, results[1:], strict=False) if a.score - b.score < 1]
         self.query_one("#insight", Static).update(
             f"Nearly tied: ranks #{close[0][0].rank} and #{close[0][1].rank} "
             f"(gap {close[0][0].score - close[0][1].score:.1f})."
@@ -177,9 +173,7 @@ class ResultsScreen(BaseScreen):
         project = self.pairrank.project
         if row and project:
             self.app.push_screen(
-                DetailDialog(
-                    row, matchup_groups(row.item, project.items, list(project.comparisons.values()))
-                )
+                DetailDialog(row, matchup_groups(row.item, project.items, list(project.comparisons.values())))
             )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -254,19 +248,13 @@ class MatrixScreen(BaseScreen):
         for i, item in enumerate(project.items, 1):
             cells = []
             for other in project.items:
-                comparison = (
-                    project.comparisons.get(pair_key(item.id, other.id))
-                    if item.id != other.id
-                    else None
-                )
+                comparison = project.comparisons.get(pair_key(item.id, other.id)) if item.id != other.id else None
                 if comparison is None:
                     cells.append("—")
                 elif comparison.outcome == Outcome.TIE:
                     cells.append("T")
                 else:
-                    won = (item.id == comparison.item_a_id) == (
-                        comparison.outcome == Outcome.A_WINS
-                    )
+                    won = (item.id == comparison.item_a_id) == (comparison.outcome == Outcome.A_WINS)
                     cells.append("W" if won else "L")
             table.add_row(f"{i}  {item.name}", *cells)
         table.focus()
@@ -290,8 +278,7 @@ class RevisitScreen(BaseScreen):
         with Container(classes="page"):
             yield Label("Revisit comparisons", classes="hero")
             yield Static(
-                "Select an item, then select a matchup to change the decision. "
-                "Changes recalculate scores immediately.",
+                "Select an item, then select a matchup to change the decision. Changes recalculate scores immediately.",
                 classes="muted",
             )
             yield DataTable(id="items", cursor_type="row")
@@ -355,11 +342,7 @@ class RevisitScreen(BaseScreen):
         current = (
             "Tie"
             if comparison.outcome == Outcome.TIE
-            else names[
-                comparison.item_a_id
-                if comparison.outcome == Outcome.A_WINS
-                else comparison.item_b_id
-            ]
+            else names[comparison.item_a_id if comparison.outcome == Outcome.A_WINS else comparison.item_b_id]
         )
 
         def revise(outcome: Outcome | None) -> None:

@@ -11,9 +11,7 @@ from .updater import check_and_pull
 
 def main() -> None:
     """Launch the TUI, optionally on a particular workflow."""
-    parser = argparse.ArgumentParser(
-        prog="pairrank", description="PairRank — Pairwise Prioritization"
-    )
+    parser = argparse.ArgumentParser(prog="pairrank", description="PairRank — Pairwise Prioritization")
     parser.add_argument(
         "command",
         nargs="?",

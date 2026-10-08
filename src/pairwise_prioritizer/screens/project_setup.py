@@ -27,9 +27,7 @@ class ColumnDialog(ModalScreen[str | None]):
     def compose(self) -> ComposeResult:
         with Container(classes="dialog"):
             yield Label("Which CSV column contains the item names?", classes="section-title")
-            yield Select(
-                [(column, column) for column in self.columns], id="column", allow_blank=False
-            )
+            yield Select([(column, column) for column in self.columns], id="column", allow_blank=False)
             with Horizontal(classes="dialog-buttons"):
                 yield Button("Cancel", id="cancel")
                 yield Button("Import", id="confirm", variant="primary")
@@ -60,8 +58,7 @@ class SetupScreen(BaseScreen):
         with Container(classes="page setup-page"):
             yield Label("New ranking", classes="hero")
             yield Static(
-                "Give your decision set a name and add one item per line. "
-                "Paste a whole list at once.",
+                "Give your decision set a name and add one item per line. Paste a whole list at once.",
                 classes="muted",
             )
             yield Label("PROJECT NAME", classes="field-label")
@@ -100,18 +97,14 @@ class SetupScreen(BaseScreen):
                     ]
                 )
             )
-        (
-            self.query_one("#path", Input) if self.import_focus else self.query_one("#name", Input)
-        ).focus()
+        (self.query_one("#path", Input) if self.import_focus else self.query_one("#name", Input)).focus()
         self.refresh_workload()
 
     def on_text_area_changed(self, _: TextArea.Changed) -> None:
         self.refresh_workload()
 
     def refresh_workload(self) -> None:
-        lines = [
-            line.strip() for line in self.query_one(TextArea).text.splitlines() if line.strip()
-        ]
+        lines = [line.strip() for line in self.query_one(TextArea).text.splitlines() if line.strip()]
         count = len(lines)
         total = count * (count - 1) // 2
         warning = "  ⚠ Large set: consider the workload before starting." if count > 30 else ""

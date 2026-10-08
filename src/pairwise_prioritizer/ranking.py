@@ -47,9 +47,7 @@ class RankingResult:
 class RankingStrategy(Protocol):
     """Pluggable estimator interface."""
 
-    def calculate(
-        self, items: Sequence[Item], comparisons: Sequence[Comparison]
-    ) -> list[RankingResult]:
+    def calculate(self, items: Sequence[Item], comparisons: Sequence[Comparison]) -> list[RankingResult]:
         """Return results in descending priority order."""
         ...
 
@@ -70,9 +68,7 @@ class BradleyTerry:
             raise ValueError("Regularization must be positive")
         self.regularization = regularization
 
-    def calculate(
-        self, items: Sequence[Item], comparisons: Sequence[Comparison]
-    ) -> list[RankingResult]:
+    def calculate(self, items: Sequence[Item], comparisons: Sequence[Comparison]) -> list[RankingResult]:
         """Estimate strengths with cyclic coordinate Newton steps; ties give 0.5 each."""
         indices = {item.id: index for index, item in enumerate(items)}
         if len(indices) != len(items):
@@ -137,9 +133,7 @@ class BradleyTerry:
         ]
 
 
-def matchup_groups(
-    item: Item, items: Sequence[Item], comparisons: Sequence[Comparison]
-) -> dict[str, list[str]]:
+def matchup_groups(item: Item, items: Sequence[Item], comparisons: Sequence[Comparison]) -> dict[str, list[str]]:
     """Group opponents into wins/losses/ties for an item detail view."""
     names = {candidate.id: candidate.name for candidate in items}
     groups: dict[str, list[str]] = {"Beat": [], "Lost to": [], "Tied": []}

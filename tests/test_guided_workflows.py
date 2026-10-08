@@ -30,6 +30,9 @@ def test_matrix_steps_validate_without_losing_judgments():
     assert state["alternatives"][0]["name"] == "Build"  # mapping never mutates the source
     reordered = advance("matrix", state, 0, {"alternatives": "Buy\nBuild"}, mapping=[1, 0])
     assert reordered["alternatives"][0]["scores"] == [6, 2]
+    extended = advance("matrix", state, 0, {"alternatives": "Build\nBuy\nTrial"}, mapping=[0, 1, None])
+    assert [row["scores"] for row in extended["alternatives"]] == [[9, 8], [6, 2], []]
+    assert reachable_index("matrix", extended) == 2
     with pytest.raises(ValueError, match="discarding scores"):
         advance("matrix", state, 0, {"alternatives": "Other\nBuy"}, mapping=[None, 1])
     blank = advance("matrix", state, 0, {"alternatives": "Other\nBuy"}, mapping=[None, 1], discard_scores=True)

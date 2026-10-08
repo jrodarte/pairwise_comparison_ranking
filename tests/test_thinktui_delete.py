@@ -33,7 +33,7 @@ def test_repository_delete_cascades_and_is_atomic(tmp_path):
     with pytest.raises(sqlite3.IntegrityError):
         store.delete_project(victim)
     assert store.load(analysis).id == analysis
-    assert len(store.events(analysis)) == 2
+    assert len(store.events(analysis)) == 1
     store.db.execute("DROP TRIGGER block_delete")
     store.delete_project(victim)
     assert [r["id"] for r in store.projects()] == [survivor]
@@ -41,7 +41,7 @@ def test_repository_delete_cascades_and_is_atomic(tmp_path):
         store.load(analysis)
     assert store.events(analysis) == []
     assert store.load(other).id == other
-    assert len(store.events(other)) == 2
+    assert len(store.events(other)) == 1
     assert store.setting("ai_provider") == "off"
     store.close()
     reopened = Store(tmp_path / "records.db")

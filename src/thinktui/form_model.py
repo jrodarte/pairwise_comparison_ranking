@@ -22,6 +22,7 @@ class FormField(Field):
     maximum: float | None = None
     choices: tuple[str, ...] = ()
     reference: str = ""
+    optional: bool = False
     children: tuple[FormField, ...] = ()
     show_for: tuple[str, ...] = ()  # visible only for these distribution choices
 
@@ -73,6 +74,14 @@ BOUNDS = {
     "scores": (0, 10),
 }
 LONG = {"narrative", "description", "rationale", "why", "evidence", "implications", "indicators"}
+# Example integers describe shape, not whether a measured quantity must be whole.
+# Keep counts/seeds as integers; these judgments accept finite fractional values.
+DECIMAL_PATHS = {
+    "fermi": {"factors.low", "factors.estimate", "factors.high"},
+    "reference_class": {"cases.estimate", "cases.actual", "inside_estimate"},
+    "signposts": {"indicators.threshold", "indicators.current"},
+    "monte_carlo": {"constant", "threshold"},
+}
 HIDDEN = {
     "change_mind",
     "_guided_step",
@@ -278,6 +287,20 @@ def conditional_node_fields(method_id: str) -> tuple[FormField, ...]:
 def schema_for(method_id: str) -> tuple[FormField, ...]:
     """All worksheet methods use their published example *shape*, not its contents."""
     example = METHODS[method_id].example
+    if method_id == "fmea":
+        example = {**example, "scale_max": 10}
+
+    def merge_rows(rows: list) -> dict:
+        """An example's first row is not a schema: later rows may have optional keys."""
+        merged: dict = {}
+        for row in rows:
+            if isinstance(row, dict):
+                for key, value in row.items():
+                    if key not in merged:
+                        merged[key] = value
+                    elif isinstance(value, dict) and isinstance(merged[key], dict):
+                        merged[key] = {**merged[key], **value}
+        return merged
 
     def build(key: str, value: Any, path: str) -> FormField:
         label = title(key)
@@ -304,13 +327,25 @@ def schema_for(method_id: str) -> tuple[FormField, ...]:
                 why="Parents show how objectives connect.",
             )
         if isinstance(value, list):
-            sample = value[0] if value else ""
+            sample = merge_rows(value) if value and isinstance(value[0], dict) else value[0] if value else ""
             if method_id == "monte_carlo" and path == "variables":
                 children = monte_variable_fields()
             elif isinstance(sample, dict):
                 children = tuple(build(k, v, f"{path}.{k}") for k, v in sample.items())
             elif isinstance(sample, list):
                 children = (FormField("value", "Value", kind="text", help="Enter a value.", why=why),)
+                if method_id == "sensitivity" and path == "alternatives.scores":
+                    children = (
+                        FormField(
+                            "value",
+                            "Score",
+                            kind="float",
+                            minimum=0,
+                            maximum=10,
+                            help="Enter a score from 0 to 10.",
+                            why="Scores are aligned with the criterion in the same position.",
+                        ),
+                    )
             else:
                 children = (build("value", sample, path),)
             return FormField(
@@ -385,35 +420,77 @@ def schema_for(method_id: str) -> tuple[FormField, ...]:
             choices = ("a_wins", "b_wins", "tie")
         if key == "direction" and method_id == "signposts":
             choices = ("above", "below")
-        if choices or isinstance(value, bool):
+        references = {
+            ("sensitivity", "vary"): "criteria",
+            ("opportunity_cost", "chosen"): "alternatives",
+            ("bradley_terry", "a"): "items",
+            ("bradley_terry", "b"): "items",
+            ("causal_loop", "from"): "variables",
+            ("causal_loop", "to"): "variables",
+            ("stock_flow", "from"): "stocks",
+            ("stock_flow", "to"): "stocks",
+            ("bottleneck", "stage"): "stages",
+        }
+        reference = references.get((method_id, key), "") if key != "stage" or path == "proposal.stage" else ""
+        if reference:
+            kind = "reference"
+        elif choices or isinstance(value, bool):
             kind = "choice"
             if isinstance(value, bool):
                 choices = ("Yes", "No")
         elif key.endswith("date") or key == "date":
             kind = "date"
         elif isinstance(value, (int, float)) and not isinstance(value, bool):
-            kind = "int" if isinstance(value, int) else "float"
+            kind = (
+                "int"
+                if key in {"iterations", "seed", "scale_max", "trials", "sample_size"}
+                or method_id in {"fmea", "risk_matrix"}
+                and key in {"severity", "occurrence", "detectability", "likelihood", "impact"}
+                else "float"
+            )
         else:
             kind = "long_text" if key in LONG else "text"
         low, high = BOUNDS.get(key, (None, None))
         if key == "confidence" and isinstance(value, float):
             high = 1
         if key in {"likelihood", "impact"} and method_id == "risk_matrix":
-            low, high = 1, 10
-        if key == "scores":
+            low, high = 1, 10  # enforce the user's scale_max in the form as well
+        if method_id == "fmea" and key in {"severity", "occurrence", "detectability"}:
+            low, high = 1, 20
+        if key == "scale_max":
+            low, high = 2, 20 if method_id == "fmea" else 10
+        if method_id == "bayesian_update" and key in {"prior", "p_if_true", "p_if_false"}:
+            low, high = 0, 1
+        if method_id == "monte_carlo" and key == "iterations":
+            low, high = 100, 50000
+        if method_id in {"fermi", "reference_class"} and key in {"low", "estimate", "high", "actual"}:
+            low = 0
+        sensitivity_score = method_id == "sensitivity" and path == "alternatives.scores" and key == "value"
+        sensitivity_bound = method_id == "sensitivity" and path == "range" and key == "value"
+        if key == "scores" or sensitivity_score or sensitivity_bound or path in DECIMAL_PATHS.get(method_id, ()):
             kind = "float"
+        if sensitivity_score:
+            low, high = 0, 10
+            help_text = "Enter your score from 0 to 10 (decimals allowed)."
+        if sensitivity_bound:
+            low, high = 0, 1
+            help_text = "Enter a bound between 0 and 1 (decimals allowed)."
         return FormField(
             key,
             label,
             kind=kind,
             multiline=kind == "long_text",
             help=help_text
-            if kind not in {"int", "float", "date"}
+            if kind not in {"int", "float", "date"} or sensitivity_bound or sensitivity_score
             else ("Use YYYY-MM-DD." if kind == "date" else "Enter your own numeric judgment."),
             why=why,
             minimum=low,
             maximum=high,
             choices=choices,
+            reference=reference,
+            optional=(method_id == "signposts" and path == "indicators.current")
+            or (method_id == "bottleneck" and path.startswith("proposal."))
+            or (method_id == "constraints" and path.startswith("throughput.")),
         )
 
     return tuple(build(key, value, key) for key, value in example.items() if key not in HIDDEN)
@@ -434,7 +511,7 @@ def blank(field: FormField) -> Any:
 def parse(field: FormField, raw: str) -> Any:
     value = raw.strip()
     if not value:
-        return None if field.kind == "reference" else ""
+        return None if field.kind == "reference" or field.optional else ""
     if field.kind in {"int", "float"}:
         try:
             result = int(value) if field.kind == "int" else float(value)

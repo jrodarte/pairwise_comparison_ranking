@@ -194,6 +194,7 @@ class FMEA(StructuredMethod):
     category = "Risk"
     description = "Display severity, occurrence, detectability and a screening RPN."
     example = {
+        "scale_max": 10,
         "failure_modes": [
             {
                 "mode": "API outage",
@@ -206,7 +207,7 @@ class FMEA(StructuredMethod):
                 "action": "Add failover",
                 "owner": "Team",
             }
-        ]
+        ],
     }
 
     def calculate(self, state: dict) -> dict:

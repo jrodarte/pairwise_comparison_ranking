@@ -37,7 +37,7 @@ async def test_editor_and_ai_pane_responsive(tmp_path, method_id, guided, trigge
         assert isinstance(button.parent, Horizontal)
         assert button.parent is widget.parent
         assert button.region.x >= widget.region.right
-        assert button.region.width <= 4
+        assert button.region.width <= 16
         if isinstance(widget, Input):
             assert widget.region.height == 2
         await pilot.resize_terminal(80, 24)
@@ -84,8 +84,8 @@ async def test_workspace_assumption_and_row_triggers_end_of_entry(tmp_path, meth
             button = app.screen.query_one(f"#{ident}", Button)
             assert button.parent is entry.parent
             assert button.region.x >= previous_right
-            assert button.region.width <= 4
-            assert str(button.label) == "AI"
+            assert button.region.width <= 16
+            assert str(button.label)  # descriptive action
             assert button.tooltip
             previous_right = button.region.right
         if method_id == "premortem":
@@ -107,8 +107,8 @@ async def test_form_rows_trigger_beside_add_row_and_sidebar_scrolls_on_narrow_te
         assert suggest.parent is add.parent
         assert isinstance(add.parent, Horizontal)
         assert suggest.region.x >= add.region.right
-        assert suggest.region.width <= 4
-        assert str(suggest.label) == "AI"
+        assert suggest.region.width <= 16
+        assert str(suggest.label) == "Suggest rows"
         assert suggest.tooltip
         pane = screen.query_one(".ai-pane", VerticalScroll)
         preview = screen.query_one("#form-preview", TextArea)

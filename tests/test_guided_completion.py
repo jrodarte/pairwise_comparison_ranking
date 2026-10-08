@@ -98,7 +98,7 @@ async def test_review_multiple_records_and_export(tmp_path, method_id, stages, m
         assert store.load(session.id).completed_at
         screen.query_one("#more").press()
         await pilot.pause()
-        assert store.load(session.id).completed_at is None
+        assert store.load(session.id).completed_at  # navigating to Add does not invalidate review
         await fill(screen, pilot, more)
         if method_id == "forecasting":
             await fill(screen, pilot, {"probability": "80"})

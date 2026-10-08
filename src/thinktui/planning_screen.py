@@ -136,7 +136,25 @@ class PlanningScreen(Screen):
                     self.notify("Resumed the existing planned step")
                     return
             else:
-                state = transfer(self.source, method_id)
+                if method_id == "sensitivity" and self.source.method_id == "matrix":
+                    existing = next(
+                        (
+                            saved
+                            for saved in app.store.sessions(self.source.project_id)
+                            if saved.method_id == "sensitivity"
+                            and saved.method_state.get("source_session_id") == self.source.id
+                        ),
+                        None,
+                    )
+                    if existing:
+                        app.open_session(existing, guided=True)
+                        self.notify("Resumed the linked sensitivity analysis")
+                        return
+                try:
+                    state = transfer(self.source, method_id)
+                except ValueError as exc:
+                    self.notify(str(exc), severity="warning")
+                    return
                 session = Session(
                     project_id=self.source.project_id,
                     method_id=method_id,

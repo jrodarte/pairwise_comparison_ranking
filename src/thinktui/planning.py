@@ -72,7 +72,11 @@ def continue_workflow(source: Session) -> Session:
         raise ValueError("No planned next step")
     if source.completed_at is None or METHODS[source.method_id].validate(source.method_state):
         raise ValueError("Finish and validate this analysis before continuing the workflow")
-    state = transfer(source, method_id)
+    state = (
+        sensitivity_from_matrix(source).method_state
+        if source.method_id == "matrix" and method_id == "sensitivity"
+        else transfer(source, method_id)
+    )
     state.update(
         {key: deepcopy(source.method_state[key]) for key in ("workflow_id", "workflow_goal", "workflow_steps")}
     )
@@ -147,10 +151,7 @@ def transfer(source: Session, target_id: str) -> dict:
         state["alternatives"] = [row["name"] for row in src.get("alternatives", [])]
         # Numerical scores and criterion weights are NOT pairwise AHP judgments.
     elif target_id == "sensitivity" and source.method_id == "matrix":
-        state.update({key: deepcopy(src[key]) for key in ("criteria", "alternatives") if key in src})
-        if src.get("criteria"):
-            state["vary"] = src["criteria"][0]["name"]
-        state["range"] = [0, 1]
+        return sensitivity_from_matrix(source).method_state
     elif target_id == "fmea" and source.method_id == "premortem":
         state["failure_modes"] = [
             {
@@ -185,3 +186,61 @@ def transfer(source: Session, target_id: str) -> dict:
             for indicator in row.get("indicators", [])
         ]
     return state
+
+
+def sensitivity_pair(source: Session) -> tuple[int, int]:
+    """Suggest the two highest-ranked options, without committing a comparison."""
+    state = source.method_state
+    if source.method_id != "matrix" or METHODS["matrix"].validate(state):
+        raise ValueError("Calculate the decision matrix before testing sensitivity")
+    if len(state["criteria"]) < 2:
+        raise ValueError("Sensitivity needs at least two criteria")
+    ranking = METHODS["matrix"].calculate(state)["ranking"]
+    available = list(range(len(state["alternatives"])))
+    selected = []
+    for row in ranking[:2]:
+        index = next(i for i in available if state["alternatives"][i]["name"] == row["name"])
+        selected.append(index)
+        available.remove(index)
+    return selected[0], selected[1]
+
+
+def sensitivity_from_matrix(source: Session, pair: tuple[int, int] | None = None) -> Session:
+    """Prepare a linked draft with only the explicitly selected matrix judgments."""
+    if source.method_id != "matrix" or METHODS["matrix"].validate(source.method_state):
+        raise ValueError("Calculate the decision matrix before testing sensitivity")
+    state = source.method_state
+    if len(state["criteria"]) < 2:
+        raise ValueError("Sensitivity needs at least two criteria")
+    if pair is None:
+        pair = sensitivity_pair(source)
+    if (
+        not isinstance(pair, tuple)
+        or len(pair) != 2
+        or any(type(i) is not int or not 0 <= i < len(state["alternatives"]) for i in pair)
+        or pair[0] == pair[1]
+    ):
+        raise ValueError("Choose two different matrix options to compare")
+    copied = {
+        "criteria": [
+            {key: deepcopy(value) for key, value in criterion.items() if key in ("name", "weight", "direction")}
+            for criterion in state["criteria"]
+        ],
+        "alternatives": [
+            {"name": state["alternatives"][i]["name"], "scores": deepcopy(state["alternatives"][i]["scores"])}
+            for i in pair
+        ],
+        "vary": state["criteria"][0]["name"],
+        "range": [0, 1],
+        "source_session_id": source.id,
+    }
+    if issues := METHODS["sensitivity"].validate(copied):
+        raise ValueError("Matrix cannot feed sensitivity: " + " ".join(issues))
+    return Session(
+        project_id=source.project_id,
+        method_id="sensitivity",
+        title=source.title + " · Sensitivity",
+        problem_statement=source.problem_statement,
+        objective=source.objective,
+        method_state=copied,
+    )

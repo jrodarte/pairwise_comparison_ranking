@@ -113,7 +113,7 @@ async def test_linked_matrix_ahp_finish_and_export(tmp_path):
         ahp.query_one("#guided-export-path", Input).value = str(destination)
         ahp.action_export()
         assert "Analytic Hierarchy Process" in destination.read_text()
-        assert first.id in destination.read_text()
+        assert first.title in destination.read_text()
         # Restore creates new project/session IDs throughout audit changes and links.
         imported = store.import_snapshot(store.snapshot(project))
         restored = {s.method_id: s for s in store.sessions(imported)}

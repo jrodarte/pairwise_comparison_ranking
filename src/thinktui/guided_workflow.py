@@ -74,18 +74,20 @@ def definition(method: str, state: dict, index: int) -> Step:
     if method == "matrix":
         if index == 0:
             return Step(
-                "Alternatives · diverge",
-                "List at least two distinct options, one per line. Include 'do nothing' if relevant.",
+                "Choose options to compare",
+                "Name at least two distinct choices below. Include 'do nothing' if it is a real option. "
+                "Add or remove rows as needed; bulk paste is optional.",
                 (Field("alternatives", "Options", "\n".join(a["name"] for a in state.get("alternatives", [])), True),),
             )
         if index == 1:
             criteria = "\n".join(
-                f"{c['name']} | {c.get('weight') or ''} | {c.get('direction', 'benefit')}"
+                f"{c['name']} | {'' if c.get('weight') is None else c['weight']} | {c.get('direction', 'benefit')}"
                 for c in state.get("criteria", [])
             )
             return Step(
-                "Criteria & weights",
-                "One per line: Name | nonnegative weight | benefit or cost. Weights are normalized at calculation.",
+                "Choose what matters",
+                "Add each criterion, give it your relative weight, and choose whether higher or lower scores "
+                "are better. No need to make weights add up to 100.",
                 (Field("criteria", "Criteria, weights, directions", criteria, True),),
             )
         if index == 2:
@@ -257,12 +259,61 @@ def definition(method: str, state: dict, index: int) -> Step:
     raise ValueError("No guided workflow for this method")
 
 
+class LabelMappingRequired(ValueError):
+    """Guided AHP/ACH labels have saved judgments needing an explicit mapping."""
+
+    def __init__(self, method: str, index: int, previous: list[str], proposed: list[str]) -> None:
+        super().__init__("Confirm which old judgments belong to each edited label")
+        self.method, self.index, self.previous, self.proposed = method, index, previous, proposed
+
+
+class ScenarioMappingRequired(ValueError):
+    """Saved narratives must be mapped to edited axis poles explicitly."""
+
+    method = "scenarios"
+    index = 1
+
+    def __init__(self, previous_axes: list[dict], proposed_axes: list[dict]) -> None:
+        super().__init__("Confirm where each saved scenario and strategy action belongs on the revised axes")
+        self.previous = [
+            f"{q}: {previous_axes[0][a]}, {previous_axes[1][b]}"
+            for q, a, b in (
+                ("low_low", "low", "low"),
+                ("low_high", "low", "high"),
+                ("high_low", "high", "low"),
+                ("high_high", "high", "high"),
+            )
+        ]
+        self.proposed = [
+            f"{q}: {proposed_axes[0][a]}, {proposed_axes[1][b]}"
+            for q, a, b in (
+                ("low_low", "low", "low"),
+                ("low_high", "low", "high"),
+                ("high_low", "high", "low"),
+                ("high_high", "high", "high"),
+            )
+        ]
+
+
 class MatrixMappingRequired(ValueError):
     """A scored matrix needs an explicit old-to-new judgment mapping."""
 
     def __init__(self, index: int, previous: list[str], proposed: list[str]) -> None:
         super().__init__("Confirm which existing scores belong to each edited label before continuing")
         self.index, self.previous, self.proposed = index, previous, proposed
+
+
+def checked_label_mapping(previous: list[str], proposed: list[str], mapping: list[int | None]) -> None:
+    """Never discard a saved ACH/AHP judgment during a rename or reorder."""
+    if (
+        len(previous) != len(proposed)
+        or len(mapping) != len(proposed)
+        or any(type(source) is not int for source in mapping)
+        or set(mapping) != set(range(len(previous)))
+    ):
+        raise ValueError(
+            "Map every saved label exactly once; create a separate analysis to change the number of judged labels"
+        )
 
 
 def matrix_score_present(value: object) -> bool:
@@ -439,7 +490,23 @@ def advance(
                 and data[key] != labels
                 and (data.get("criteria_matrix") or data.get("alternative_matrices"))
             ):
-                raise ValueError("Judgments exist; use Advanced JSON to revise labels without losing comparisons")
+                before = data[key]
+                if mapping is None:
+                    raise LabelMappingRequired("ahp", index, before, labels)
+                checked_label_mapping(before, labels, mapping)
+                if index == 0:
+                    matrix = data.get("criteria_matrix")
+                    if matrix:
+                        data["criteria_matrix"] = [[matrix[i][j] for j in mapping] for i in mapping]
+                    old_alternatives = data.get("alternative_matrices", {})
+                    data["alternative_matrices"] = {
+                        label: old_alternatives[before[source]]
+                        for label, source in zip(labels, mapping, strict=True)
+                        if before[source] in old_alternatives
+                    }
+                else:
+                    for criterion, matrix in data.get("alternative_matrices", {}).items():
+                        data["alternative_matrices"][criterion] = [[matrix[i][j] for j in mapping] for i in mapping]
             data[key] = labels
         elif index == 2:
             data["criteria_matrix"] = matrix_from_pairs(len(data["criteria"]), values)
@@ -452,7 +519,14 @@ def advance(
         if index == 0:
             labels = distinct(lines(values["hypotheses"]), "hypotheses")
             if data.get("evidence") and data.get("hypotheses") != labels:
-                raise ValueError("Evidence is rated; use Advanced JSON to revise hypotheses without losing ratings")
+                before = data["hypotheses"]
+                if mapping is None:
+                    raise LabelMappingRequired("ach", index, before, labels)
+                checked_label_mapping(before, labels, mapping)
+                for entry in data["evidence"]:
+                    entry["ratings"] = {
+                        label: entry["ratings"][before[source]] for label, source in zip(labels, mapping, strict=True)
+                    }
             data["hypotheses"] = labels
         elif index == 1:
             entry = {
@@ -463,7 +537,14 @@ def advance(
             }
             if any(r not in {"++", "+", "0", "-", "--", "?"} for r in entry["ratings"].values()):
                 raise ValueError("Rate all hypotheses ++, +, 0, -, -- or ?")
-            data.setdefault("evidence", []).append(entry)
+            evidence = data.setdefault("evidence", [])
+            if "edit_index" in values:
+                selected = int(values["edit_index"])
+                if not 0 <= selected < len(evidence):
+                    raise ValueError("Choose a saved evidence item")
+                evidence[selected] = entry
+            else:
+                evidence.append(entry)
     elif method == "forecasting":
         if index == 0:
             draft = {
@@ -491,7 +572,14 @@ def advance(
             response = values["outcome"].strip().casefold()
             if response not in {"yes", "no", "?", ""}:
                 raise ValueError("Outcome must be yes, no or ?")
-            data["forecasts"][-1]["outcome"] = {"yes": 1, "no": 0, "?": None, "": None}[response]
+            selected = values.get("forecast_index", len(data["forecasts"]) - 1)
+            try:
+                selected = int(selected)
+            except (ValueError, TypeError):
+                raise ValueError("Choose a saved forecast to resolve") from None
+            if not 0 <= selected < len(data["forecasts"]):
+                raise ValueError("Choose a saved forecast to resolve")
+            data["forecasts"][selected]["outcome"] = {"yes": 1, "no": 0, "?": None, "": None}[response]
     elif method == "scenarios":
         if index == 0:
             data["question"] = name(values["question"], "Strategic question")
@@ -503,7 +591,22 @@ def advance(
             if len({a["name"].casefold() for a in axes}) < 2 or any(a["low"] == a["high"] for a in axes):
                 raise ValueError("Choose two distinct axes with distinct low/high poles")
             if data.get("scenarios") and data.get("axes") != axes:
-                raise ValueError("Narratives exist; use Advanced JSON to revise axes without losing quadrant meaning")
+                if mapping is None:
+                    raise ScenarioMappingRequired(data["axes"], axes)
+                checked_label_mapping(list(QUADRANTS), list(QUADRANTS), mapping)
+                prior = data["scenarios"]
+                data["scenarios"] = {
+                    q: prior[QUADRANTS[source]]
+                    for q, source in zip(QUADRANTS, mapping, strict=True)
+                    if QUADRANTS[source] in prior
+                }
+                for strategy in data.get("strategies", []):
+                    old_actions = strategy["actions"]
+                    strategy["actions"] = {
+                        q: old_actions[QUADRANTS[source]]
+                        for q, source in zip(QUADRANTS, mapping, strict=True)
+                        if QUADRANTS[source] in old_actions
+                    }
             data["axes"] = axes
         elif 2 <= index <= 5:
             key = QUADRANTS[index - 2]
@@ -518,7 +621,18 @@ def advance(
                 "name": name(values["name"], "Strategy"),
                 "actions": {key: name(values[f"action_{key}"], f"Action in {key}") for key in QUADRANTS},
             }
-            if any(row["name"].casefold() == strategy["name"].casefold() for row in data.get("strategies", [])):
+            strategies = data.setdefault("strategies", [])
+            selected = int(values["edit_index"]) if "edit_index" in values else None
+            if any(
+                row["name"].casefold() == strategy["name"].casefold()
+                for i, row in enumerate(strategies)
+                if i != selected
+            ):
                 raise ValueError("Strategy names must be distinct")
-            data.setdefault("strategies", []).append(strategy)
+            if selected is None:
+                strategies.append(strategy)
+            elif 0 <= selected < len(strategies):
+                strategies[selected] = strategy
+            else:
+                raise ValueError("Choose a saved strategy")
     return data

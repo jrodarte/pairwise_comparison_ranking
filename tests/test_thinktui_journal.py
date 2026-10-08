@@ -44,7 +44,7 @@ def test_field_changes_and_migration_from_v1(tmp_path):
     """)
     db.close()
     store = Store(path)
-    assert store.db.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert store.db.execute("PRAGMA user_version").fetchone()[0] == 5
     assert json.loads(store.events("s")[0]["changes"]) == []
     changes = field_changes({"method_state": {"chosen": "A"}}, {"method_state": {"chosen": "B"}})
     assert changes == [
@@ -101,7 +101,7 @@ async def test_journal_create_autosave_review_export_and_history(tmp_path):
         assert table.row_count >= 2
         await pilot.press("enter")
         details = str(app.screen.query_one("#event-details", Static).render())
-        assert "method_state" in details
+        assert "method state" in details
         await pilot.press("escape")
         app.home()
         await pilot.pause()

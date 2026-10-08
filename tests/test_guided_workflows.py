@@ -194,6 +194,24 @@ async def test_scored_matrix_requires_explicit_discard_confirmation(tmp_path):
         assert [row["scores"] for row in store.load(session.id).method_state["alternatives"]] == [[9], [6]]
 
 
+def test_simple_guided_name_lists_round_trip_without_structured_row_syntax():
+    # These are plain names, unlike matrix criteria: one line is exactly one label.
+    ahp = {"criteria": ["Value | impact", "0"], "alternatives": ["Build", "Wait"]}
+    for index, key in ((0, "criteria"), (1, "alternatives")):
+        text = definition("ahp", ahp, index).fields[0].value
+        assert text.splitlines() == ahp[key]
+        assert advance("ahp", ahp, index, {key: text})[key] == ahp[key]
+    ach = {"hypotheses": ["Network", "0"]}
+    text = definition("ach", ach, 0).fields[0].value
+    assert advance("ach", ach, 0, {"hypotheses": text})["hypotheses"] == ach["hypotheses"]
+    scenarios = {"question": "Which approach?", "drivers": ["Demand | timing", "0"]}
+    question, drivers = definition("scenarios", scenarios, 0).fields
+    assert (
+        advance("scenarios", scenarios, 0, {"question": question.value, "drivers": drivers.value})["drivers"]
+        == scenarios["drivers"]
+    )
+
+
 def test_ahp_steps_recips_and_consistency():
     state = advance("ahp", {}, 0, {"criteria": "Value\nCost"})
     state = advance("ahp", state, 1, {"alternatives": "A\nB"})
@@ -226,8 +244,8 @@ def test_ach_forecast_scenario_steps():
     assert METHODS["ach"].calculate(state)["ranking"][0]["hypothesis"] == "Network"
     assert METHODS["ach"].calculate(state)["evidence"][0]["source"] == "Operator log"
     report = decision_brief(Session("project", "ach", "Case", method_state=state))
-    assert '"source": "Operator log"' in report and '"Pool": "--"' in report
-    with pytest.raises(ValueError, match="use Advanced JSON"):
+    assert "Source: Operator log" in report and "Pool: --" in report
+    with pytest.raises(ValueError, match="Confirm which old judgments"):
         advance("ach", state, 0, {"hypotheses": "Pool\nTraffic"})
     forecast = advance(
         "forecasting", {}, 0, {"question": "Ship by Q4?", "resolution_date": "", "rationale": "User estimate"}
@@ -275,7 +293,7 @@ def test_ach_forecast_scenario_steps():
     )
     assert len(METHODS["scenarios"].calculate(scenario)["scenarios"]) == 4
     assert definition("scenarios", scenario, 7).review
-    with pytest.raises(ValueError, match="Narratives exist"):
+    with pytest.raises(ValueError, match="Confirm where each saved scenario"):
         advance(
             "scenarios",
             scenario,

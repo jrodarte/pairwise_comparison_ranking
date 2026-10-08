@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import argparse
-import asyncio
+import sqlite3
+from pathlib import Path
 
-from . import __version__, ai, credentials
+from platformdirs import user_data_path
+
+from . import __version__
 from .app import ThinkApp
 from .core import METHODS
-from .storage import Store
 
 
 def main() -> None:
@@ -22,19 +24,21 @@ def main() -> None:
     parser.add_argument("--version", action="version", version=f"ThinkTUI {__version__}")
     args = parser.parse_args()
     if args.command == "doctor":
-        store = Store()
-        print(f"Database: {store.path}\nMethods: {len(METHODS)}\nAI setting: {ai.status_label(store)}")
-        try:
-            config = asyncio.run(ai.resolve(store))
-            print(f"AI active: {ai.describe(config)}")
-            if status := ai.key_status(config.preset_id):
-                print(status)
-        except RuntimeError as exc:
-            print(f"AI active: none ({exc})")
-        ollama = asyncio.run(ai.detect_ollama(ai.config_for(store, "ollama").base_url))
-        print("Ollama: " + (f"running, {len(ollama)} model(s)" if ollama is not None else "not detected"))
-        print("Keyring: " + ("available" if credentials.keyring_available() else "unavailable (keys kept per session)"))
-        store.close()
+        path = user_data_path("thinktui") / "thinktui.db"
+        print(f"Database: {path}\nMethods: {len(METHODS)}")
+        if path.exists():
+            try:
+                db = sqlite3.connect(f"file:{Path(path).as_posix()}?mode=ro", uri=True)
+                try:
+                    version = db.execute("PRAGMA user_version").fetchone()[0]
+                    print(f"Schema version: {version}")
+                finally:
+                    db.close()
+            except sqlite3.Error as exc:
+                print(f"Database could not be read: {exc}")
+        else:
+            print("Database not created yet")
+        print("AI: not probed (open Settings and press Ctrl+R to check providers)")
         return
     ThinkApp(
         initial={"new": "new", "methods": "methods", "settings": "settings", "journal": "journal"}.get(

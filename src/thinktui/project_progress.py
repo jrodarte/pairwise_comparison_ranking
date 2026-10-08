@@ -5,9 +5,9 @@ from __future__ import annotations
 from .core import Session
 
 STEPS = (
-    ("Why", ("objectives", "value_focused"), "objectives"),
-    ("Who", ("issue_tree", "scenarios"), "issue_tree"),
-    ("What", ("value_focused", "matrix"), "value_focused"),
+    ("Why", ("objectives",), "objectives"),
+    ("Who", ("assumptions",), "assumptions"),
+    ("What", ("value_focused",), "value_focused"),
     ("Where", ("issue_tree", "causal_loop"), "issue_tree"),
     ("When", ("backcasting", "forecasting"), "backcasting"),
     ("How", ("premortem", "fmea"), "premortem"),

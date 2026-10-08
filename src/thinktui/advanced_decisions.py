@@ -23,7 +23,10 @@ class StructuredMethod:
         return []
 
     def summarize(self, state: dict) -> str:
-        return f"{self.name}: {len(self.calculate(state))} result fields."
+        from .reports import plain_result
+
+        lines = plain_result(self.calculate(state)).splitlines()
+        return "\n".join(lines[:10]) + ("\n… open the report for all results" if len(lines) > 10 else "")
 
 
 def number(value: Any, label: str, minimum: float | None = None) -> float:

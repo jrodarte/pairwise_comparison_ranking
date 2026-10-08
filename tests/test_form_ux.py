@@ -89,7 +89,7 @@ def test_progress_only_counts_finished_analyses():
     draft.completed_at = "now"
     rows, next_method = checklist([draft])
     assert "Reviewed" in rows[0]
-    assert next_method == "issue_tree"
+    assert next_method == "assumptions"
 
 
 def test_numeric_and_date_validation():
@@ -202,7 +202,7 @@ async def test_bradley_terry_outcome_is_select_and_saves_enum(tmp_path):
         await pilot.pause()
         for key, label in (("a", "North"), ("b", "South")):
             ident = next(i for i, (path, _) in app.screen.fields.items() if path == ("comparisons", 0, key))
-            app.screen.query_one(f"#{ident}", Input).value = label
+            app.screen.query_one(f"#{ident}", Select).value = label
         ident = next(i for i, (path, _) in app.screen.fields.items() if path == ("comparisons", 0, "outcome"))
         selector = app.screen.query_one(f"#{ident}", Select)
         assert {value for _, value in selector._options} >= {"a_wins", "b_wins", "tie"}
@@ -320,10 +320,8 @@ async def test_blank_form_example_opt_in_and_resume(tmp_path):
         assert app.screen.query_one(f"#{label}", Input).value == "Customer value"
         app.screen.query_one("#load-example", Button).press()
         await pilot.pause()
-        assert (
-            session.method_state == METHODS["objectives"].example
-            or app.session.method_state == METHODS["objectives"].example
-        )
+        assert app.session.method_state["nodes"][0]["label"] == "Customer value"
+        assert len(app.session.method_state["nodes"]) == 1  # cannot overwrite work with example
         assert app.screen.query_one(Select)
         assert "{" not in str(app.screen.query_one("#form-results"))
         await pilot.press("f6")

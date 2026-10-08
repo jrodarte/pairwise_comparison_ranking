@@ -1,7 +1,7 @@
 """Focused tests for visible priorities, hierarchy, resume, export and history."""
 
 import pytest
-from textual.widgets import DataTable, Input, Label, Static
+from textual.widgets import Button, DataTable, Input, Label, Static
 
 from thinktui.app import ThinkApp
 from thinktui.core import METHODS, Session
@@ -63,10 +63,11 @@ async def test_tree_keyboard_resume_and_export(tmp_path):
             "Communication",
         ]
         screen.query_one("#tree", DataTable).move_cursor(row=0)
-        await pilot.press("tab")
+        screen.query_one("#tree", DataTable).focus()
+        await pilot.press("f")
         assert len(screen.tree_rows) == 1
         assert len(nested(session.method_state)[0]["children"]) == 2
-        await pilot.press("tab")
+        await pilot.press("f")
         screen.query_one("#tree", DataTable).move_cursor(row=1)
         screen.query_one("#tree", DataTable).focus()
         editor.value = "API documentation"
@@ -76,12 +77,17 @@ async def test_tree_keyboard_resume_and_export(tmp_path):
         assert nested(session.method_state)[0]["children"][0]["label"] == "API documentation"
         path = tmp_path / "tree.md"
         export(session, path)
-        assert '"children"' in path.read_text()
+        assert "Children:" in path.read_text()
         assert "API documentation" in path.read_text()
         screen.query_one("#tree", DataTable).focus()
         await pilot.press("d")
         assert len(nested(session.method_state)[0]["children"]) == 2  # confirmation required
+        app.screen.query_one("#cancel", Button).press()
+        await pilot.pause()
+        assert len(nested(session.method_state)[0]["children"]) == 2
         await pilot.press("d")
+        app.screen.query_one("#confirm", Button).press()
+        await pilot.pause()
         assert len(nested(session.method_state)[0]["children"]) == 1
         app.open_session(store.load(session.id))
         await pilot.pause()
@@ -168,7 +174,7 @@ async def test_assumptions_impact_visible_and_saved_in_narrow_terminal(tmp_path)
         assert "impact 9/10" in str(app.screen.query_one("#results", Static).render())
         path = tmp_path / "assumptions.md"
         export(app.session, path)
-        assert '"impact": 9' in path.read_text()
+        assert "Impact: 9" in path.read_text()
     store.close()
 
 
@@ -186,9 +192,9 @@ async def test_history_accessible_from_project(tmp_path):
         await pilot.pause()
         await pilot.press("h")
         assert isinstance(app.screen, History)
-        assert app.screen.query_one("#events", DataTable).row_count == 2
+        assert app.screen.query_one("#events", DataTable).row_count == 1  # no event for an unchanged save
         rows = app.screen.query_one("#events", DataTable)
-        assert "Added assumption" in str(rows.get_row_at(0))
+        assert "Created analysis" in str(rows.get_row_at(0))
         await pilot.press("escape")
         assert app.project_id == project
     store.close()

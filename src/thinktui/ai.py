@@ -191,6 +191,47 @@ def is_local(config: ProviderConfig) -> bool:
     return config.preset.kind in {"ollama", "openai"} and bool(config.base_url) and is_local_url(config.base_url)
 
 
+def sharing_destination(config: ProviderConfig) -> str:
+    """Disclose remote host and provider without exposing URL credentials or query strings."""
+    host = parse.urlparse(config.base_url).hostname
+    return "LOCAL" if is_local(config) else f"REMOTE → {config.preset.label}" + (f" ({host})" if host else "")
+
+
+def public_error(exc: Exception) -> str:
+    """Show actionable provider failures without echoing arbitrary secret-bearing error text."""
+    message = str(exc)
+    safe = (
+        "No API key",
+        "not signed in",
+        "Not signed in",
+        "no models",
+        "not found",
+        "timed out",
+        "unreadable response",
+        "no answer",
+        "AI is off",
+        "Could not reach AI provider",
+        "Choose a model",
+        "HTTP ",
+    )
+    return (
+        message
+        if any(part in message for part in safe)
+        and not any(word in message.lower() for word in ("secret", "token", "password", "bearer"))
+        else "Provider request failed; check Settings and provider logs"
+    )
+
+
+def remote_consent(store, config: ProviderConfig) -> bool:
+    """Consent is tied to the destination, not a transferable global preference."""
+    if is_local(config):
+        return True
+    allowed_url = store.setting(f"ai.{config.preset_id}.consent_url", config.preset.base_url)
+    return store.setting(f"ai.{config.preset_id}.consent") == "yes" and allowed_url.rstrip(
+        "/"
+    ) == config.base_url.rstrip("/")
+
+
 def describe(config: ProviderConfig) -> str:
     where = " / Local" if is_local(config) else ""
     return f"{config.preset.label}{where}" + (f" · {config.model}" if config.model else "")

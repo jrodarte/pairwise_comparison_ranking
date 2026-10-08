@@ -6,22 +6,55 @@ judgments, including dates, are never supplied by this helper.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 
 from textual.widgets import Static, TextArea
 
-from .ai import AIRequest, connect, context_for, describe, is_local, selected_provider, visible_text
+from .ai import (
+    AIRequest,
+    connect,
+    context_for,
+    describe,
+    public_error,
+    remote_consent,
+    selected_provider,
+    sharing_destination,
+    visible_text,
+)
 from .core import Session
+
+NUMERIC_JUDGMENT = re.compile(
+    r"(?:\b(?:score|weight|probability|confidence|rating|likelihood|impact|cost|risk|date|deadline|odds)\s*[:=]?\s*[-+]?\d|\d+(?:\.\d+)?\s*%|\b\d{4}[-/.]\d{1,2}[-/.]\d{1,2}\b|\b\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}\b|\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2}\b|^\s*[-+]?\d+(?:\.\d+)?\s*$)",
+    re.IGNORECASE,
+)
+
+
+def text_only(answer: str) -> str:
+    """Omit numeric judgments, not harmless prose such as 'Phase 2'."""
+    return "\n".join(line for line in answer.splitlines() if not NUMERIC_JUDGMENT.search(line)).strip()
 
 
 async def stream_text_draft(
-    store, session: Session, label: str, rows: bool, on_chunk: Callable[[str], None], connect_fn=None
+    store,
+    session: Session,
+    label: str,
+    rows: bool,
+    on_chunk: Callable[[str], None],
+    connect_fn=None,
+    on_start: Callable[[str], None] | None = None,
 ) -> tuple[str, str]:
     if selected_provider(store) == "off":
         raise ValueError("AI is off. Enter your own text instead.")
     provider, config = await (connect_fn or connect)(store)
-    if not is_local(config) and store.setting("ai_consent") != "yes":
-        raise ValueError("Review AI privacy and consent in Settings before sharing this analysis.")
+    if not remote_consent(store, config):
+        raise ValueError(
+            f"Review remote AI consent for {config.preset.label} in Settings before sharing this analysis."
+        )
+    if on_start:
+        on_start(
+            f"{sharing_destination(config)} · Sharing: method, problem, objective, assumptions, full method state (not notes or history)"
+        )
     question = (
         f"Suggest {'a few distinct lines for' if rows else 'one short draft for'} {label}. "
         "Return plain text only; no scores, weights, probabilities, confidence, impact, dates, "
@@ -30,10 +63,10 @@ async def stream_text_draft(
     partial = ""
     async for chunk in provider.stream(AIRequest(question, context_for(session))):
         partial += chunk
-        on_chunk(visible_text(partial))
-    answer = visible_text(partial).strip()
-    if not answer or any(character.isdigit() for character in answer):
-        raise ValueError("AI returned empty or numeric text. Nothing was changed.")
+        on_chunk(text_only(visible_text(partial)))
+    answer = text_only(visible_text(partial))
+    if not answer:
+        raise ValueError("AI returned no text without numeric judgments. Nothing was changed.")
     return answer, describe(config)
 
 
@@ -51,7 +84,9 @@ class FieldHelpMixin:
         self._field_help_ready = False
         self._field_help_partial = ""
         self.query_one("#field-help-preview", TextArea).load_text("")
-        self.query_one("#field-help-status", Static).update("Connecting to AI… Ctrl+G stops.")
+        self.query_one("#field-help-status", Static).update(
+            "Sharing: method, problem, objective, assumptions, full method state · connecting to AI… Ctrl+G stops."
+        )
         self.run_worker(self._field_help_stream(label), group="field-help", exclusive=True)
 
     async def _field_help_stream(self, label: str) -> None:
@@ -64,15 +99,22 @@ class FieldHelpMixin:
 
         try:
             answer, provider = await stream_text_draft(
-                self.app.store, self.field_help_session(), label, self._field_help_rows, update
+                self.app.store,
+                self.field_help_session(),
+                label,
+                self._field_help_rows,
+                update,
+                on_start=lambda message: self.query_one("#field-help-status", Static).update(message),
             )
             self.query_one("#field-help-preview", TextArea).load_text(answer)
             self._field_help_ready = True
             self.query_one("#field-help-status", Static).update(f"{provider} · edit, Accept or Dismiss. Not saved.")
         except ValueError as exc:
             self.query_one("#field-help-status", Static).update(str(exc))
-        except (RuntimeError, KeyError):
-            self.query_one("#field-help-status", Static).update("AI unavailable. Your analysis is preserved.")
+        except (RuntimeError, KeyError) as exc:
+            self.query_one("#field-help-status", Static).update(
+                f"AI unavailable: {public_error(exc)}. Your analysis is preserved."
+            )
 
     def field_help_session(self) -> Session:
         raise NotImplementedError
@@ -86,10 +128,8 @@ class FieldHelpMixin:
         ):
             return
         text = self.query_one("#field-help-preview", TextArea).text.strip()
-        if not text or any(character.isdigit() for character in text):
-            self.query_one("#field-help-status", Static).update(
-                "Enter text only; supply all numeric judgments yourself."
-            )
+        if not text:
+            self.query_one("#field-help-status", Static).update("Enter text before accepting.")
             return
         self.apply_field_help(self._field_help_target, text, self._field_help_rows)
         self.field_help_dismiss()

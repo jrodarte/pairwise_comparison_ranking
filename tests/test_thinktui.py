@@ -40,7 +40,8 @@ def test_persistence_export_and_privacy(tmp_path):
     destination = tmp_path / "brief.md"
     export(session, destination)
     assert "Vendor outage" in destination.read_text()
-    assert "## What Would Change Our Mind?" in decision_brief(session)
+    assert "## Decision" in decision_brief(session)
+    assert "## What would change our mind?" not in decision_brief(session)  # empty sections omitted
     with pytest.raises(ValueError):
         reopened.set_setting("secret", "bad")
     reopened.close()

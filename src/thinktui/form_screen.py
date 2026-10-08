@@ -113,6 +113,9 @@ class FormScreen(Screen):
 
     async def recompose_fields(self) -> None:
         await self.query_one(FormContents).recompose()
+        # Recomposition replaces editors. Invalid raw text was never saved and may
+        # belong to a now-hidden distribution (or a removed/reordered row).
+        self.invalid_fields.clear()
 
     def value_at(self, path: tuple[Any, ...]) -> Any:
         item: Any = self.draft

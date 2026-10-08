@@ -226,9 +226,15 @@ async def test_resume_legacy_discrete_and_edit_values_weights_without_f6(tmp_pat
         assert field(screen, ("variables", 0, "values", 1)).value == "3"
         assert field(screen, ("variables", 0, "weights", 0)).value == "1"
         assert ("variables", 0, "min") not in (path for path, _ in screen.fields.values())
+        weight_input = field(screen, ("variables", 0, "weights", 0))
+        weight_input.value = "-1"
+        await pilot.pause()
+        assert screen.invalid_fields  # rejected text is not persisted
+        assert store.load(session.id).method_state["variables"][0]["weights"] == [1, 2]
         field(screen, ("variables", 0, "distribution")).value = "samples"
         await pilot.pause()
         assert ("variables", 0, "weights") not in screen.groups.values()
+        assert not screen.invalid_fields  # hidden rejected input cannot block this valid distribution
         assert store.load(session.id).method_state["variables"][0]["weights"] == [1, 2]
         field(screen, ("variables", 0, "distribution")).value = "discrete"
         await pilot.pause()

@@ -409,6 +409,11 @@ class Store:
         session = self.load(session_id)
         if session.project_id == target_project_id:
             return
+        if any(
+            other.title.strip().casefold() == session.title.strip().casefold()
+            for other in self.sessions(target_project_id)
+        ):
+            raise ValueError("Destination project already has an analysis with this title")
         session.project_id = target_project_id
         self.save(session, "Moved analysis to another project")
 

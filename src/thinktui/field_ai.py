@@ -24,8 +24,16 @@ from .ai import (
 )
 from .core import Session
 
+_NUMBER = r"[-+]?\d+(?:\.\d+)?"
+_MONTH = r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
 NUMERIC_JUDGMENT = re.compile(
-    r"(?:\b(?:score|weight|probability|confidence|rating|likelihood|impact|cost|risk|date|deadline|odds)\s*[:=]?\s*[-+]?\d|\d+(?:\.\d+)?\s*%|\b\d{4}[-/.]\d{1,2}[-/.]\d{1,2}\b|\b\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}\b|\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2}\b|^\s*[-+]?\d+(?:\.\d+)?\s*$)",
+    rf"(?:\b(?:score|weight|probability|confidence|rating|likelihood|impact|cost|risk|date|deadline|odds)\b"
+    rf"(?:\s+(?:is|was|of|at|about|around|equals|to|as|rated|score|rating)){{0,3}}\s*[:=~]?\s*{_NUMBER}\b"
+    rf"|{_NUMBER}\s*(?:%|\bpercent(?:age)?\b|\bpct\b)"
+    rf"|\b\d{{4}}[-/.]\d{{1,2}}[-/.]\d{{1,2}}\b|\b\d{{1,2}}[-/.]\d{{1,2}}[-/.]\d{{2,4}}\b"
+    rf"|\b\d{{1,2}}(?:st|nd|rd|th)?\s+{_MONTH}\b(?:\s+\d{{4}}\b)?"
+    rf"|\b{_MONTH}\s+(?:\d{{1,2}}(?:st|nd|rd|th)?(?:,?\s+\d{{4}})?|\d{{4}})\b"
+    rf"|\b{_NUMBER}\s+out\s+of\s+\d+\b|^\s*{_NUMBER}\s*$)",
     re.IGNORECASE,
 )
 

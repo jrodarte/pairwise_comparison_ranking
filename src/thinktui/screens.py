@@ -8,6 +8,7 @@ import shlex
 import sqlite3
 import subprocess
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from textual.app import ComposeResult, SuspendNotSupported
@@ -195,10 +196,11 @@ class AnalysisDialog(ModalScreen[str | None]):
 
     BINDINGS = [("escape", "cancel", "Cancel")]
 
-    def __init__(self, label: str, *, delete: bool = False) -> None:
+    def __init__(self, label: str, *, delete: bool = False, on_confirm: Callable[[str], bool] | None = None) -> None:
         super().__init__()
         self.label = label
         self.delete = delete
+        self.on_confirm = on_confirm
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="dialog"):
@@ -220,16 +222,21 @@ class AnalysisDialog(ModalScreen[str | None]):
     def on_mount(self) -> None:
         self.query_one("#cancel" if self.delete else "#new-name").focus()
 
+    def confirm(self) -> None:
+        value = "DELETE" if self.delete else self.query_one("#new-name", Input).value.strip()
+        if self.on_confirm is not None and not self.on_confirm(value):
+            return  # Validation failed: keep the dialog, input and saved data intact.
+        self.dismiss(value)
+
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if not self.delete:
-            self.dismiss(event.value.strip() or None)
+            self.confirm()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        self.dismiss(
-            ("DELETE" if self.delete else self.query_one("#new-name", Input).value.strip())
-            if event.button.id == "confirm"
-            else None
-        )
+        if event.button.id == "confirm":
+            self.confirm()
+        else:
+            self.dismiss(None)
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -263,9 +270,10 @@ class DeleteBranchDialog(ModalScreen[bool]):
 class MoveAnalysisDialog(ModalScreen[str | None]):
     BINDINGS = [("escape", "cancel", "Cancel")]
 
-    def __init__(self, projects: list[tuple[str, str]]) -> None:
+    def __init__(self, projects: list[tuple[str, str]], on_confirm: Callable[[str], bool] | None = None) -> None:
         super().__init__()
         self.projects = projects
+        self.on_confirm = on_confirm
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="dialog"):
@@ -281,7 +289,13 @@ class MoveAnalysisDialog(ModalScreen[str | None]):
         self.query_one("#destination", Select).focus()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        self.dismiss(str(self.query_one("#destination", Select).value) if event.button.id == "confirm" else None)
+        if event.button.id == "confirm":
+            destination = str(self.query_one("#destination", Select).value)
+            if self.on_confirm is not None and not self.on_confirm(destination):
+                return
+            self.dismiss(destination)
+        else:
+            self.dismiss(None)
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -595,12 +609,19 @@ class ProjectView(Base):
         session = self.selected_analysis()
         if session:
 
+            def rename(value: str) -> bool:
+                try:
+                    self.workbench.store.rename_session(session.id, value)
+                except ValueError as exc:
+                    self.notify(str(exc), severity="warning")
+                    return False
+                return True
+
             def finish(value: str | None) -> None:
                 if value:
-                    self.workbench.store.rename_session(session.id, value)
                     self.workbench.show_project()
 
-            self.workbench.push_screen(AnalysisDialog(session.title), finish)
+            self.workbench.push_screen(AnalysisDialog(session.title, on_confirm=rename), finish)
 
     def action_delete_analysis(self) -> None:
         session = self.selected_analysis()
@@ -632,12 +653,19 @@ class ProjectView(Base):
             self.notify("Create another project before moving an analysis", severity="warning")
             return
 
+        def move(project_id: str) -> bool:
+            try:
+                self.workbench.store.move_session(session.id, project_id)
+            except ValueError as exc:
+                self.notify(str(exc), severity="warning")
+                return False
+            return True
+
         def finish(project_id: str | None) -> None:
             if project_id:
-                self.workbench.store.move_session(session.id, project_id)
                 self.workbench.show_project()
 
-        self.workbench.push_screen(MoveAnalysisDialog(targets), finish)
+        self.workbench.push_screen(MoveAnalysisDialog(targets, on_confirm=move), finish)
 
     def action_rename_project(self) -> None:
         project_id = self.workbench.project_id

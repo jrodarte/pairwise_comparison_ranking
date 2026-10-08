@@ -25,6 +25,7 @@ def test_numeric_and_date_validation():
     with pytest.raises(ValueError, match="YYYY-MM-DD"):
         parse(field, "tomorrow")
     assert parse(field, "2030-01-01") == "2030-01-01"
+    assert parse(schema_for("objectives")[0].children[1], "") is None
 
 
 @pytest.mark.asyncio
@@ -50,5 +51,9 @@ async def test_blank_form_example_opt_in_and_resume(tmp_path):
         assert app.screen.query_one(f"#{label}", Input).value == "Customer value"
         app.screen.query_one("#load-example", Button).press()
         await pilot.pause()
-        assert session.method_state == METHODS["objectives"].example or app.session.method_state == METHODS["objectives"].example
+        assert (
+            session.method_state == METHODS["objectives"].example
+            or app.session.method_state == METHODS["objectives"].example
+        )
         assert app.screen.query_one(Select)
+        assert "{" not in str(app.screen.query_one("#form-results"))

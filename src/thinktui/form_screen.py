@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from copy import deepcopy
 from typing import Any
 
@@ -30,6 +29,7 @@ class FormScreen(Screen):
         self.fields: dict[str, tuple[tuple[Any, ...], FormField]] = {}
         self.groups: dict[str, tuple[Any, ...]] = {}
         self.ai_target: str | None = None
+        self.invalid_fields: set[tuple[Any, ...]] = set()
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -197,8 +197,10 @@ class FormScreen(Screen):
         try:
             value = parse(field, raw)
         except ValueError as exc:
+            self.invalid_fields.add(path)
             self.query_one(f"#error-{ident}", Static).update(str(exc))
             return
+        self.invalid_fields.discard(path)
         self.query_one(f"#error-{ident}", Static).update("")
         self.put(path, value)
         normalize_ids(self.draft)
@@ -208,13 +210,22 @@ class FormScreen(Screen):
 
     def preview_result(self) -> None:
         method = METHODS[self.session.method_id]
+        if method.id == "monte_carlo":
+            self.query_one("#form-results", Static).update("Run the simulation only when you save.")
+            return
         try:
             result = method.calculate(self.draft)
         except (ValueError, KeyError, TypeError, IndexError, ZeroDivisionError):
+            self.query_one("#form-results", Static).update("Add the required details to see a local preview.")
             return
-        self.query_one("#form-results", Static).update(
-            "Local result preview (your inputs):\n" + json.dumps(result, ensure_ascii=False, indent=2)
-        )
+        if self.session.method_id in {"assumptions", "premortem"}:
+            rows = result.get("priorities", result.get("risks", []))
+            summary = "\n".join(
+                f"{i}. {row.get('statement', row.get('cause', 'Entry'))}" for i, row in enumerate(rows, 1)
+            )
+        else:
+            summary = method.summarize(self.draft)
+        self.query_one("#form-results", Static).update("Local result preview · your inputs:\n" + summary)
 
     def on_mount(self) -> None:
         self.preview_result()
@@ -290,6 +301,9 @@ class FormScreen(Screen):
         return result
 
     def action_save(self) -> None:
+        if self.invalid_fields:
+            self.query_one("#form-error", Static).update("Correct the highlighted entries before saving.")
+            return
         issues = METHODS[self.session.method_id].validate(self.draft)
         if issues:
             self.query_one("#form-error", Static).update("Please review: " + " ".join(issues))

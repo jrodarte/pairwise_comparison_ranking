@@ -182,6 +182,36 @@ async def test_dynamic_keyed_grids_complete_without_json(tmp_path, method_id, ro
 
 
 @pytest.mark.asyncio
+async def test_bradley_terry_outcome_is_select_and_saves_enum(tmp_path):
+    store = Store(tmp_path / "bradley.db")
+    session = Session(store.new_project("Comparison"), "bradley_terry", "Choices")
+    store.save(session)
+    app = ThinkApp(store=store)
+    async with app.run_test() as pilot:
+        app.open_session(session, guided=True)
+        await pilot.pause()
+        items = next(group for group, path in app.screen.groups.items() if path == ("items",))
+        for label in ("North", "South"):
+            app.screen.query_one(f"#{items}-add", Button).press()
+            await pilot.pause()
+            index = len(session.method_state["items"]) - 1
+            ident = next(i for i, (path, _) in app.screen.fields.items() if path == ("items", index))
+            app.screen.query_one(f"#{ident}", Input).value = label
+        comparisons = next(group for group, path in app.screen.groups.items() if path == ("comparisons",))
+        app.screen.query_one(f"#{comparisons}-add", Button).press()
+        await pilot.pause()
+        for key, label in (("a", "North"), ("b", "South")):
+            ident = next(i for i, (path, _) in app.screen.fields.items() if path == ("comparisons", 0, key))
+            app.screen.query_one(f"#{ident}", Input).value = label
+        ident = next(i for i, (path, _) in app.screen.fields.items() if path == ("comparisons", 0, "outcome"))
+        selector = app.screen.query_one(f"#{ident}", Select)
+        assert {value for _, value in selector._options} >= {"a_wins", "b_wins", "tie"}
+        selector.value = "tie"
+        await pilot.pause()
+        assert store.load(session.id).method_state["comparisons"][0]["outcome"] == "tie"
+
+
+@pytest.mark.asyncio
 async def test_legacy_grid_rename_preserves_judgments_and_collision(tmp_path):
     from copy import deepcopy
 

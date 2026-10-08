@@ -19,6 +19,8 @@ class Field:
     label: str
     value: str = ""
     multiline: bool = False
+    help: str = ""
+    why: str = ""
 
 
 @dataclass(frozen=True)

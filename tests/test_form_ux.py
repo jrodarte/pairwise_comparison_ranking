@@ -233,7 +233,7 @@ async def test_matrix_scores_render_as_rows_and_criteria_columns(tmp_path):
         await app.screen.action_next()
         app.screen.query_one("#field-criteria", TextArea).load_text("Speed | 3 | benefit\nEffort | 2 | cost")
         await app.screen.action_next()
-        assert len(app.screen.query("Input.matrix-grid-cell")) == 4
+        assert len(app.screen.query(".matrix-grid-row Input")) == 4
         assert len(app.screen.query(".matrix-grid-row")) == 3  # heading and two alternatives
 
 

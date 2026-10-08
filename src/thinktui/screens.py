@@ -52,6 +52,7 @@ from .ai import (
 )
 from .context_offers import offers
 from .core import METHODS, Session, timestamp
+from .field_ai import FieldHelpMixin
 from .guided_workflow import GUIDED
 from .issue_tree import add as tree_add
 from .issue_tree import delete as tree_delete
@@ -600,7 +601,7 @@ class NewAnalysis(Base):
         self.workbench.switch_screen(Library())
 
 
-class Workspace(Base):
+class Workspace(FieldHelpMixin, Base):
     BINDINGS = [
         ("a", "left", "Left"),
         ("d", "right", "Right"),
@@ -610,7 +611,7 @@ class Workspace(Base):
         ("escape", "back", "Project"),
         ("ctrl+s", "save", "Save"),
         ("ctrl+k", "challenge", "Challenge"),
-        ("ctrl+g", "stop_ai", "Stop AI"),
+        Binding("ctrl+g", "stop_ai", "Stop AI", priority=True),
         ("ctrl+e", "export", "Export"),
         Binding("tab", "tree_toggle", "Fold / next", priority=True),
         Binding("shift+enter", "tree_sibling", "Add sibling", priority=True),
@@ -713,19 +714,46 @@ class Workspace(Base):
                                 classes="muted",
                             )
                             yield Button("Use next issue-tree question", id="use-issue-offer")
+                    yield Label(
+                        "Assumption" if session.method_id == "assumptions" else "Possible failure", classes="heading"
+                    )
+                    yield Static(
+                        "Describe one testable claim or failure. Why: this is what you will review or prevent.",
+                        classes="muted",
+                    )
                     yield Input(placeholder="Assumption / failure mode", id="entry")
+                    yield Button("Suggest text for statement", id="help-entry")
+                    yield Label("Test or prevention", classes="heading")
+                    yield Static(
+                        "Describe what to test or prevent. Why: a useful risk needs a response.", classes="muted"
+                    )
                     yield Input(placeholder="Validation test / preventive action (optional)", id="action")
+                    yield Button("Suggest text for action", id="help-action")
                     yield Label(
                         "Confidence (0–100)" if session.method_id == "assumptions" else "Likelihood (0–100)",
                         classes="heading",
                     )
-                    yield Input(id="confidence", type="integer")
+                    yield Static(
+                        "Your rating, 0–100. Why: likelihood or confidence changes which risks to test first.",
+                        classes="muted",
+                    )
+                    yield Input(id="confidence", type="integer", placeholder="Your rating, 0–100")
                     yield Label("Impact (1–10)", classes="heading")
-                    yield Input(id="impact", type="integer")
+                    yield Static("Your rating, 1–10. Why: larger consequences need closer attention.", classes="muted")
+                    yield Input(id="impact", type="integer", placeholder="Your rating, 1–10")
+                    yield Static("", id="dedicated-feedback", classes="muted")
                     yield Button("Add entry", id="add", variant="primary")
+                    yield Button("Suggest rows · statements only", id="help-rows")
+                    yield Button("Use next accepted row", id="next-draft-row")
                 yield Static("", id="results")
             yield Label("What would change your mind?", classes="heading")
             yield Input(value=session.method_state.get("change_mind", ""), id="change-mind")
+            if session.method_id in {"assumptions", "premortem"}:
+                yield Static(
+                    "What new observation would change this assessment? Why: it makes review actionable.",
+                    classes="muted",
+                )
+                yield Button("Suggest text for change of mind", id="help-change-mind")
             with Horizontal(classes="actions"):
                 yield Button("Export  Ctrl+E", id="export")
                 yield Button("Challenge  Ctrl+K", id="challenge")
@@ -749,6 +777,14 @@ class Workspace(Base):
                 with Horizontal(classes="actions"):
                     yield Button("Accept edited suggestion", id="accept")
                     yield Button("Dismiss suggestion", id="dismiss")
+            if session.method_id in {"assumptions", "premortem"}:
+                yield Static("Text-only draft · edit before Accept; you supply every numeric rating.", classes="muted")
+                yield Static("", id="field-help-status", classes="muted")
+                yield TextArea(id="field-help-preview")
+                with Horizontal(classes="actions"):
+                    yield Button("Accept edited text", id="help-accept")
+                    yield Button("Dismiss", id="help-dismiss")
+                    yield Button("Stop AI  Ctrl+G", id="help-stop")
 
     def on_mount(self) -> None:
         session = self.workbench.session
@@ -756,6 +792,11 @@ class Workspace(Base):
         self.tree_editing: str | None = None
         self.tree_delete_pending: str | None = None
         self.tree_rows: list[str] = []
+        self.pending_ai_rows: list[str] = list(session.method_state.get("_text_row_drafts", []))
+        self.accepted_draft = False
+        if self.pending_ai_rows and session.method_id in {"assumptions", "premortem"}:
+            self.query_one("#entry", Input).value = self.pending_ai_rows[0]
+            self.accepted_draft = True
         if session.method_id == "issue_tree":
             self.query_one("#tree", DataTable).add_column("Issue branches")
         if session.method_id == "matrix":
@@ -773,6 +814,61 @@ class Workspace(Base):
     def persist(self, description: str) -> None:
         self.workbench.store.save(self.workbench.session, description)
 
+    def field_help_session(self) -> Session:
+        return self.workbench.session
+
+    def apply_field_help(self, target: str, text: str, rows: bool) -> None:
+        if self.workbench.session.method_id not in {"assumptions", "premortem"}:
+            return
+        if rows and target == "entries":
+            lines = [line.strip() for line in text.splitlines() if line.strip()]
+            if not lines:
+                return
+            self.pending_ai_rows.extend(lines)
+            self.workbench.session.method_state["_text_row_drafts"] = list(self.pending_ai_rows)
+            self.persist("Accepted text-only row drafts")
+            if not self.query_one("#entry", Input).value.strip():
+                self.query_one("#entry", Input).value = self.pending_ai_rows[0]
+                self.accepted_draft = True
+            self.query_one("#confidence", Input).value = ""
+            self.query_one("#impact", Input).value = ""
+            return
+        if target in {"entry", "action", "change-mind"}:
+            self.query_one(f"#{target}", Input).value = text
+            if target == "entry":
+                self.accepted_draft = True
+
+    def dedicated_feedback(self) -> None:
+        if self.workbench.session.method_id not in {"assumptions", "premortem"}:
+            return
+        targets = self.query("#dedicated-feedback")
+        if not targets or len(self.query("#entry, #confidence, #impact")) != 3:
+            return
+        statement = self.query_one("#entry", Input).value.strip()
+        confidence = self.query_one("#confidence", Input).value.strip()
+        impact = self.query_one("#impact", Input).value.strip()
+        message = "Describe the assumption or failure mode." if not statement else ""
+        for raw, label, minimum, maximum in (
+            (confidence, "Confidence / likelihood", 0, 100),
+            (impact, "Impact", 1, 10),
+        ):
+            if raw:
+                try:
+                    value = int(raw)
+                    if not minimum <= value <= maximum:
+                        raise ValueError
+                except ValueError:
+                    message = f"{label}: enter your own whole number from {minimum} to {maximum}."
+                    break
+        if not message and confidence and impact:
+            score = (
+                (1 - int(confidence) / 100) * int(impact)
+                if self.workbench.session.method_id == "assumptions"
+                else int(confidence) * int(impact)
+            )
+            message = f"Local risk priority preview: {score:g}. Your ratings are not set by AI."
+        targets.first().update(message)
+
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id and event.input.id.startswith("journal-"):
             self.workbench.session.method_state[event.input.id.removeprefix("journal-")] = event.value
@@ -780,6 +876,8 @@ class Workspace(Base):
         elif event.input.id == "change-mind":
             self.workbench.session.method_state["change_mind"] = event.value
             self.persist("Updated change-my-mind criterion")
+        elif event.input.id in {"entry", "action", "confidence", "impact"}:
+            self.dedicated_feedback()
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
         if event.text_area.id == "journal-rationale":
@@ -1068,6 +1166,37 @@ class Workspace(Base):
             self.action_challenge()
         elif action == "stop-ai":
             self.action_stop_ai()
+        elif action == "next-draft-row":
+            if self.pending_ai_rows:
+                self.query_one("#entry", Input).value = self.pending_ai_rows[0]
+                self.query_one("#confidence", Input).value = ""
+                self.query_one("#impact", Input).value = ""
+                self.accepted_draft = True
+            else:
+                self.notify("No accepted row drafts waiting")
+        elif action in {"help-entry", "help-action", "help-change-mind", "help-rows"}:
+            target = action.removeprefix("help-")
+            if target == "rows":
+                self.field_help_request(
+                    "assumptions" if self.workbench.session.method_id == "assumptions" else "failure modes",
+                    "entries",
+                    rows=True,
+                )
+            else:
+                self.field_help_request(
+                    {
+                        "entry": "a testable assumption or possible failure",
+                        "action": "a validation test or preventive action",
+                        "change-mind": "what would change your mind",
+                    }[target],
+                    target,
+                )
+        elif action == "help-accept":
+            self.field_help_accept()
+        elif action == "help-dismiss":
+            self.field_help_dismiss()
+        elif action == "help-stop":
+            self.field_help_stop()
         elif action == "suggest":
             self.request_ai("suggest")
         elif action == "accept":
@@ -1152,6 +1281,8 @@ class Workspace(Base):
         except ValueError as exc:
             self.notify(str(exc), severity="error")
             return False
+        if self.accepted_draft and source == "USER":
+            source = "AI_ACCEPTED"
         self.workbench.session.method_state.setdefault("entries", []).append(
             {
                 "statement": statement,
@@ -1162,9 +1293,21 @@ class Workspace(Base):
                 "source": source,
             }
         )
+        if self.accepted_draft and self.pending_ai_rows:
+            self.pending_ai_rows.pop(0)
+            if self.pending_ai_rows:
+                self.workbench.session.method_state["_text_row_drafts"] = list(self.pending_ai_rows)
+            else:
+                self.workbench.session.method_state.pop("_text_row_drafts", None)
         self.persist("Added " + source + " entry")
         self.query_one("#entry", Input).value = ""
         self.query_one("#action", Input).value = ""
+        self.query_one("#confidence", Input).value = ""
+        self.query_one("#impact", Input).value = ""
+        self.accepted_draft = False
+        if self.pending_ai_rows:
+            self.query_one("#entry", Input).value = self.pending_ai_rows[0]
+            self.accepted_draft = True
         self.refresh_results()
         return True
 
@@ -1269,6 +1412,8 @@ class Workspace(Base):
         self.query_one("#stop-ai", Button).disabled = not busy
 
     def action_stop_ai(self) -> None:
+        if self.workbench.session.method_id in {"assumptions", "premortem"}:
+            self.field_help_stop()
         if not any(w.group == "ai" and w.is_running for w in self.workers):
             return
         self.workers.cancel_group(self, "ai")

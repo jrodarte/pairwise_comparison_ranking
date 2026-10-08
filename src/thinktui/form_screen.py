@@ -13,8 +13,9 @@ from textual.containers import Horizontal, VerticalScroll
 from textual.screen import Screen
 from textual.widgets import Button, Footer, Header, Input, Label, Select, Static, TextArea
 
-from .ai import AIRequest, connect, context_for, describe, is_local, selected_provider, visible_text
+from .ai import connect, selected_provider, visible_text
 from .core import METHODS, Session, timestamp
+from .field_ai import stream_text_draft
 from .form_model import FormField, blank, draft_from_example, normalize_ids, parse, rename_grid_label, schema_for, title
 from .reports import export
 
@@ -425,31 +426,21 @@ class FormScreen(Screen):
 
     async def ask_ai(self, label: str, rows: bool) -> None:
         status = self.query_one("#form-ai-status", Static)
+
+        def update(text: str) -> None:
+            self.ai_partial = text
+            self.query_one("#form-preview", TextArea).load_text(text)
+            status.update(f"AI suggestion streaming · {len(text.split())} words · Ctrl+G stops")
+
         try:
-            provider, config = await connect(self.app.store)
-            if not is_local(config) and self.app.store.setting("ai_consent") != "yes":
-                status.update("Review privacy and consent in Settings before sharing this analysis.")
-                return
-            prompt = (
-                f"Suggest {'a few distinct lines for' if rows else 'one short draft for'} {label}. "
-                "Return plain text only; no scores, weights, probabilities, confidence, impact, dates, "
-                "numeric judgments, invented evidence, or JSON. The user must review and accept it."
+            answer, provider = await stream_text_draft(
+                self.app.store, self.session, label, rows, update, connect_fn=connect
             )
-            context = context_for(self.session)  # same whitelist as Challenge; never send notes or history
-            context["state"] = deepcopy(self.draft)
-            async for chunk in provider.stream(AIRequest(prompt, context)):
-                self.ai_partial += chunk
-                self.query_one("#form-preview", TextArea).load_text(visible_text(self.ai_partial))
-                status.update(
-                    f"{describe(config)} · streaming {len(visible_text(self.ai_partial).split())} words · Ctrl+G stops"
-                )
-            answer = visible_text(self.ai_partial).strip()
-            if not answer or any(character.isdigit() for character in answer):
-                status.update("AI returned empty or numeric text. Nothing was changed.")
-                return
             self.query_one("#form-preview", TextArea).load_text(answer)
             self.ai_ready = True
-            status.update("AI draft received · edit, Accept or Dismiss. Not saved.")
+            status.update(f"{provider} · edit, Accept or Dismiss. Not saved.")
+        except ValueError as exc:
+            status.update(str(exc))
         except (RuntimeError, KeyError):
             status.update("AI unavailable. Your analysis is preserved.")
 

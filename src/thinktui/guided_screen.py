@@ -2,27 +2,31 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from pathlib import Path
 
 from textual.app import ComposeResult
-from textual.containers import Horizontal, VerticalScroll
+from textual.binding import Binding
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import Screen
 from textual.widgets import Button, Footer, Header, Input, Label, Static, TextArea
 
 from .context_offers import offers
 from .core import METHODS, Session, timestamp
+from .field_ai import FieldHelpMixin
 from .guided_workflow import GUIDED, advance, definition, final_index, next_index, reachable_index
 from .planning import planned_next
 from .reports import export, plain_result
 
 
-class GuidedScreen(Screen):
+class GuidedScreen(FieldHelpMixin, Screen):
     BINDINGS = [
         ("f8", "next", "Validate & next"),
         ("f7", "previous", "Previous"),
         ("f6", "advanced", "Advanced JSON"),
         ("ctrl+s", "next", "Save step"),
         ("ctrl+e", "export", "Export"),
+        Binding("ctrl+g", "stop_ai", "Stop AI", priority=True),
         ("escape", "project", "Project"),
     ]
 
@@ -75,20 +79,36 @@ class GuidedScreen(Screen):
                         yield Label(str(alternative["name"]), classes="matrix-grid-name")
                         for j, criterion in enumerate(criteria):
                             field = next(field for field in step.fields if field.key == f"score_{i}_{j}")
-                            yield Input(
-                                value=field.value,
-                                placeholder="0–10",
-                                id=f"field-{field.key}",
-                                classes="matrix-grid-cell",
-                                tooltip=f"{alternative['name']} · {criterion['name']}",
-                            )
+                            with Vertical(classes="matrix-grid-cell"):
+                                yield Input(
+                                    value=field.value,
+                                    placeholder="0–10",
+                                    id=f"field-{field.key}",
+                                    tooltip=f"{alternative['name']} · {criterion['name']}: your score matters to the ranking.",
+                                )
+                                yield Static("Your score, 0–10. Why: this criterion contributes to the ranking.", classes="muted")
+                                yield Static("", id=f"guided-error-{field.key}", classes="muted")
             else:
                 for field in step.fields:
                     yield Label(field.label, classes="heading")
+                    yield Static(
+                        (field.help or f"Enter your own {field.label.lower()}.")
+                        + " Why: "
+                        + (field.why or "This input explains or changes the local calculation."),
+                        classes="muted",
+                    )
                     if field.multiline:
                         yield TextArea(field.value, id=f"field-{field.key}")
                     else:
                         yield Input(value=field.value, placeholder=field.label, id=f"field-{field.key}")
+                    if self.can_suggest(field.key):
+                        yield Button(
+                            "Suggest rows"
+                            if field.key in {"alternatives", "criteria", "hypotheses"}
+                            else "Suggest text",
+                            id=f"help-suggest-{field.key}",
+                        )
+                    yield Static("", id=f"guided-error-{field.key}", classes="muted")
             if step.review:
                 try:
                     issues = method.validate(self.session.method_state)
@@ -127,7 +147,85 @@ class GuidedScreen(Screen):
                         yield Button("Continue planned workflow", id="plan")
                 yield Button("Advanced JSON  F6", id="advanced")
                 yield Button("Project  Esc", id="project")
+            yield Static("AI text draft · edit, Accept or Dismiss. Numbers are always yours.", classes="muted")
+            yield Static("", id="field-help-status", classes="muted")
+            yield TextArea(id="field-help-preview")
+            with Horizontal(classes="actions"):
+                yield Button("Accept edited text", id="help-accept")
+                yield Button("Dismiss", id="help-dismiss")
+                yield Button("Stop AI  Ctrl+G", id="help-stop")
         yield Footer()
+
+    def can_suggest(self, key: str) -> bool:
+        return key in {
+            "alternatives",
+            "criteria",
+            "hypotheses",
+            "title",
+            "source",
+            "question",
+            "rationale",
+            "narrative",
+            "implications",
+            "indicators",
+            "name",
+            "drivers",
+            "axes",
+        } or key.startswith("action_")
+
+    def field_help_session(self) -> Session:
+        draft = deepcopy(self.session)
+        if self.index != final_index(self.session.method_id, self.session.method_state):
+            draft.method_state = {**draft.method_state, "_draft_fields": self.current_values()}
+        return draft
+
+    def apply_field_help(self, target: str, text: str, rows: bool) -> None:
+        if target not in {
+            field.key for field in definition(self.session.method_id, self.session.method_state, self.index).fields
+        }:
+            return
+        widget = self.query_one(f"#field-{target}")
+        if isinstance(widget, (Input, TextArea)):
+            current = widget.value if isinstance(widget, Input) else widget.text
+            value = (current.rstrip() + "\n" + text).strip() if rows and current.strip() else text
+            if isinstance(widget, TextArea):
+                widget.load_text(value)
+            else:
+                widget.value = value
+
+    def guided_issue(self, key: str, text: str) -> str:
+        if not text.strip():
+            return "Enter your own input before continuing."
+        if key.startswith("score_"):
+            try:
+                value = float(text)
+                if not 0 <= value <= 10:
+                    raise ValueError
+            except ValueError:
+                return "Enter your own score from 0 to 10."
+        if self.session.method_id == "matrix" and (self.index, key) in {(0, "alternatives"), (1, "criteria")}:
+            try:
+                advance("matrix", self.session.method_state, self.index, {key: text})
+            except (ValueError, KeyError) as exc:
+                return str(exc)
+        return ""
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id and event.input.id.startswith("field-"):
+            key = event.input.id.removeprefix("field-")
+            targets = self.query(f"#guided-error-{key}")
+            if targets:
+                targets.first().update(self.guided_issue(key, event.value))
+
+    def on_text_area_changed(self, event: TextArea.Changed) -> None:
+        if event.text_area.id and event.text_area.id.startswith("field-"):
+            key = event.text_area.id.removeprefix("field-")
+            targets = self.query(f"#guided-error-{key}")
+            if targets:
+                targets.first().update(self.guided_issue(key, event.text_area.text))
+
+    def action_stop_ai(self) -> None:
+        self.field_help_stop()
 
     def on_mount(self) -> None:
         self.focus_first()
@@ -165,6 +263,8 @@ class GuidedScreen(Screen):
         self.app.store.save(
             self.session, f"Guided {method}: {self.index + 1} · " + ("Reviewed" if is_review else "Saved step")
         )
+        self.field_help_stop()
+        self.field_help_dismiss()
         await self.recompose()
         self.focus_first()
         if is_review:
@@ -175,6 +275,8 @@ class GuidedScreen(Screen):
             self.index -= 1
             self.session.method_state["_guided_step"] = self.index
             self.app.store.save(self.session, "Revisited guided step")
+            self.field_help_stop()
+            self.field_help_dismiss()
             await self.recompose()
             self.focus_first()
 
@@ -237,6 +339,21 @@ class GuidedScreen(Screen):
             self.action_plan()
         elif event.button.id == "review":
             await self.action_review()
+        elif event.button.id and event.button.id.startswith("help-suggest-"):
+            key = event.button.id.removeprefix("help-suggest-")
+            if self.can_suggest(key):
+                field = next(
+                    field
+                    for field in definition(self.session.method_id, self.session.method_state, self.index).fields
+                    if field.key == key
+                )
+                self.field_help_request(field.label, key, rows=key in {"alternatives", "criteria", "hypotheses"})
+        elif event.button.id == "help-accept":
+            self.field_help_accept()
+        elif event.button.id == "help-dismiss":
+            self.field_help_dismiss()
+        elif event.button.id == "help-stop":
+            self.field_help_stop()
         elif event.button.id == "use-offer":
             available = offers("matrix", self.app.store.sessions(self.session.project_id), self.session.id)
             state = self.session.method_state

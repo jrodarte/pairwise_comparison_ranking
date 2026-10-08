@@ -84,7 +84,7 @@ class Store:
     def migrate(self) -> None:
         with self.db:
             version = self.db.execute("PRAGMA user_version").fetchone()[0]
-            if version > 2:
+            if version > 3:
                 raise ValueError("Database created by a newer ThinkTUI")
             if version == 0:
                 self.db.executescript("""
@@ -103,14 +103,30 @@ class Store:
             if version == 1:
                 self.db.execute("ALTER TABLE events ADD COLUMN changes TEXT NOT NULL DEFAULT '[]'")
                 self.db.execute("PRAGMA user_version=2")
+                version = 2
+            if version == 2:
+                self.db.execute("ALTER TABLE projects ADD COLUMN planning_question TEXT NOT NULL DEFAULT ''")
+                self.db.execute("PRAGMA user_version=3")
 
     def new_project(self, name: str) -> str:
         if not name.strip():
             raise ValueError("Project name is required")
         project_id = str(uuid4())
         with self.db:
-            self.db.execute("INSERT INTO projects VALUES (?, ?, ?)", (project_id, name.strip(), timestamp()))
+            self.db.execute(
+                "INSERT INTO projects (id,name,created_at) VALUES (?, ?, ?)", (project_id, name.strip(), timestamp())
+            )
         return project_id
+
+    def set_planning_question(self, project_id: str, question: str) -> None:
+        with self.db:
+            if (
+                self.db.execute(
+                    "UPDATE projects SET planning_question=? WHERE id=?", (question.strip(), project_id)
+                ).rowcount
+                != 1
+            ):
+                raise KeyError(project_id)
 
     def projects(self) -> list[sqlite3.Row]:
         return self.db.execute("SELECT * FROM projects ORDER BY created_at DESC").fetchall()
@@ -192,7 +208,10 @@ class Store:
         remapped = {old: str(uuid4()) for old in old_ids}
         audit_ids = {original_project: new_id, **remapped}
         with self.db:
-            self.db.execute("INSERT INTO projects VALUES (?,?,?)", (new_id, project["name"], timestamp()))
+            self.db.execute(
+                "INSERT INTO projects (id,name,created_at,planning_question) VALUES (?,?,?,?)",
+                (new_id, project["name"], timestamp(), project.get("planning_question", "")),
+            )
             for session in sessions:
                 old_id = session.id
                 session.id = remapped[old_id]

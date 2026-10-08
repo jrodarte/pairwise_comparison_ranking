@@ -5,6 +5,7 @@ from textual.widgets import Button, Input, Select
 
 from thinktui.ai import FakeAIProvider, ProviderConfig
 from thinktui.app import ThinkApp
+from thinktui.context_offers import offers
 from thinktui.core import METHODS, Session
 from thinktui.form_model import normalize_ids, parse, schema_for
 from thinktui.form_screen import FormScreen
@@ -19,6 +20,52 @@ def test_schemas_cover_structured_methods_and_preserve_generated_references():
     normalize_ids(state)
     assert [node["id"] for node in state["nodes"]] == ["a-choice", "a-choice-2"]
     assert schema_for("objectives")[0].children[1].kind == "reference"
+
+
+def test_project_question_migration_and_text_only_offers(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "old.db"
+    legacy = sqlite3.connect(path)
+    legacy.executescript("""
+        CREATE TABLE projects(id TEXT PRIMARY KEY,name TEXT NOT NULL,created_at TEXT NOT NULL);
+        CREATE TABLE sessions(id TEXT PRIMARY KEY, project_id TEXT NOT NULL, method_id TEXT NOT NULL, data TEXT NOT NULL, updated_at TEXT NOT NULL);
+        CREATE TABLE events(id INTEGER PRIMARY KEY,session_id TEXT NOT NULL,timestamp TEXT NOT NULL,description TEXT NOT NULL,changes TEXT NOT NULL DEFAULT '[]');
+        CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+        PRAGMA user_version=2;
+    """)
+    legacy.commit()
+    legacy.close()
+    store = Store(path)
+    project = store.new_project("Plan")
+    store.set_planning_question(project, "What should we launch?")
+    assert store.project(project)["planning_question"] == "What should we launch?"
+    assert store.snapshot(project)["project"]["planning_question"] == "What should we launch?"
+    source = Session(
+        project,
+        "value_focused",
+        "Values",
+        completed_at="yesterday",
+        method_state={
+            "alternatives": ["Pilot", "Wait"],
+            "objectives": [{"kind": "fundamental", "measure": "Speed", "name": "Faster"}],
+        },
+    )
+    tree = Session(
+        project,
+        "issue_tree",
+        "Questions",
+        completed_at="yesterday",
+        method_state={
+            "nodes": [
+                {"id": "root", "parent_id": None, "label": "Why?"},
+                {"id": "leaf", "parent_id": "root", "label": "Will customers care?"},
+            ]
+        },
+    )
+    assert offers("matrix", [source], "new") == {"alternatives": ["Pilot", "Wait"], "criteria": ["Speed"]}
+    assert offers("assumptions", [tree], "new") == {"statements": ["Will customers care?"]}
+    assert offers("matrix", [Session(project, "value_focused", "Draft", method_state=source.method_state)], "new") == {}
 
 
 def test_numeric_and_date_validation():

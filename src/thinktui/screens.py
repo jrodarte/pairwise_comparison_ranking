@@ -50,6 +50,7 @@ from .ai import (
     status_label,
     visible_text,
 )
+from .context_offers import offers
 from .core import METHODS, Session, timestamp
 from .guided_workflow import GUIDED
 from .issue_tree import add as tree_add
@@ -323,6 +324,13 @@ class ProjectView(Base):
         yield from self.chrome()
         with VerticalScroll(classes="page"):
             yield Label("Project analyses", classes="hero")
+            yield Label("Shared planning question", classes="heading")
+            yield Input(
+                value=self.workbench.store.project(self.workbench.project_id)["planning_question"],
+                placeholder="What are we trying to understand or decide?",
+                id="project-question",
+            )
+            yield Button("Save planning question", id="save-question")
             yield Static(
                 "Select an analysis to resume; create another from the method library.",
                 classes="muted",
@@ -361,7 +369,12 @@ class ProjectView(Base):
         self.workbench.open_session(self.workbench.store.load(str(event.row_key.value)), guided=True)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "history":
+        if event.button.id == "save-question":
+            self.workbench.store.set_planning_question(
+                self.workbench.project_id, self.query_one("#project-question", Input).value
+            )
+            self.notify("Planning question saved for future analyses")
+        elif event.button.id == "history":
             self.action_history()
         elif event.button.id == "delete":
             self.action_delete()
@@ -548,6 +561,10 @@ class NewAnalysis(Base):
             yield Button("Start", id="start", variant="primary")
 
     def on_mount(self) -> None:
+        if self.workbench.project_id:
+            self.query_one("#problem", Input).value = self.workbench.store.project(self.workbench.project_id)[
+                "planning_question"
+            ]
         self.query_one("#title", Input).focus()
 
     def on_button_pressed(self, _: Button.Pressed) -> None:
@@ -674,6 +691,16 @@ class Workspace(Base):
                         yield Button("Tab · Fold / unfold", id="tree-toggle")
                     yield DataTable(id="tree", cursor_type="row")
                 else:
+                    if session.method_id == "assumptions":
+                        suggestions = offers(
+                            "assumptions", self.workbench.store.sessions(session.project_id), session.id
+                        )
+                        if suggestions:
+                            yield Static(
+                                "Earlier issue-tree questions (labels only): " + "; ".join(suggestions["statements"]),
+                                classes="muted",
+                            )
+                            yield Button("Use next issue-tree question", id="use-issue-offer")
                     yield Input(placeholder="Assumption / failure mode", id="entry")
                     yield Input(placeholder="Validation test / preventive action (optional)", id="action")
                     yield Label(
@@ -1006,6 +1033,18 @@ class Workspace(Base):
                 self.workbench.session.completed_at = timestamp()
                 self.persist("Saved decision record")
                 self.notify("Decision journal saved")
+        elif action == "use-issue-offer":
+            suggestions = offers(
+                "assumptions",
+                self.workbench.store.sessions(self.workbench.session.project_id),
+                self.workbench.session.id,
+            )
+            existing = {row.get("statement") for row in self.workbench.session.method_state.get("entries", [])}
+            candidate = next((label for label in suggestions.get("statements", []) if label not in existing), None)
+            if candidate:
+                self.query_one("#entry", Input).value = candidate
+                self.query_one("#confidence", Input).focus()
+                self.notify("Enter your own confidence and impact before adding")
         elif action == "add":
             self.add_entry()
         elif action == "export":

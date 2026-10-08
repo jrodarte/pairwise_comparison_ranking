@@ -10,6 +10,7 @@ from textual.containers import Horizontal, VerticalScroll
 from textual.screen import Screen
 from textual.widgets import Button, Footer, Header, Input, Label, Static, TextArea
 
+from .context_offers import offers
 from .core import METHODS, Session, timestamp
 from .guided_workflow import GUIDED, advance, definition, final_index, next_index, reachable_index
 from .planning import planned_next
@@ -49,6 +50,16 @@ class GuidedScreen(Screen):
                 id="step-heading",
             )
             yield Static(step.help, classes="muted")
+            if method.id == "matrix" and self.index == 0:
+                available = offers("matrix", self.app.store.sessions(self.session.project_id), self.session.id)
+                if available:
+                    yield Static(
+                        "Earlier value-focused analysis: "
+                        + "; ".join(f"{key}: {', '.join(values)}" for key, values in available.items())
+                        + ". Labels only; you supply weights and scores.",
+                        classes="muted",
+                    )
+                    yield Button("Use these starting points", id="use-offer")
             for field in step.fields:
                 yield Label(field.label, classes="heading")
                 if field.multiline:
@@ -203,5 +214,16 @@ class GuidedScreen(Screen):
             self.action_plan()
         elif event.button.id == "review":
             await self.action_review()
+        elif event.button.id == "use-offer":
+            available = offers("matrix", self.app.store.sessions(self.session.project_id), self.session.id)
+            state = self.session.method_state
+            if not state.get("alternatives"):
+                state["alternatives"] = [{"name": label, "scores": []} for label in available.get("alternatives", [])]
+            if not state.get("criteria"):
+                state["criteria"] = [
+                    {"name": label, "weight": None, "direction": "benefit"} for label in available.get("criteria", [])
+                ]
+            self.app.store.save(self.session, "Accepted text-only value-focused starting points")
+            await self.recompose()
         else:
             self.action_project()

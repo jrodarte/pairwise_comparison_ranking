@@ -257,6 +257,38 @@ def definition(method: str, state: dict, index: int) -> Step:
     raise ValueError("No guided workflow for this method")
 
 
+class MatrixMappingRequired(ValueError):
+    """A scored matrix needs an explicit old-to-new judgment mapping."""
+
+    def __init__(self, index: int, previous: list[str], proposed: list[str]) -> None:
+        super().__init__("Confirm which existing scores belong to each edited label before continuing")
+        self.index, self.previous, self.proposed = index, previous, proposed
+
+
+def matrix_score_present(value: object) -> bool:
+    """Treat even malformed, nonblank legacy inputs as judgments, never silent trash."""
+    return value is not None and value != ""
+
+
+def matrix_has_scores(state: dict) -> bool:
+    return any(matrix_score_present(score) for row in state.get("alternatives", []) for score in row.get("scores", []))
+
+
+def matrix_mapping(before: list[str], after: list[str]) -> list[int | None]:
+    """Propose exact-name matches only; a rename is a new row until confirmed."""
+    return [before.index(label) if label in before else None for label in after]
+
+
+def checked_mapping(previous: list[str], proposed: list[str], mapping: list[int | None]) -> None:
+    if len(mapping) != len(proposed) or any(
+        source is not None and (type(source) is not int or not 0 <= source < len(previous)) for source in mapping
+    ):
+        raise ValueError("Choose one existing row or a new blank row for every label")
+    selected = [source for source in mapping if source is not None]
+    if len(selected) != len(set(selected)):
+        raise ValueError("Each existing scored row can map to only one new label")
+
+
 def reachable_index(method: str, state: dict) -> int:
     """A stale/malformed saved cursor cannot bypass missing prior steps."""
     if method == "matrix":
@@ -264,7 +296,14 @@ def reachable_index(method: str, state: dict) -> int:
             return 0
         if not state.get("criteria"):
             return 1
-        if any(len(row.get("scores", [])) != len(state["criteria"]) for row in state["alternatives"]):
+        if any(
+            len(row.get("scores", [])) != len(state["criteria"])
+            or any(
+                type(score) not in (int, float) or not math.isfinite(score) or not 0 <= score <= 10
+                for score in row.get("scores", [])
+            )
+            for row in state["alternatives"]
+        ):
             return 2
         return 3
     if method == "ahp":
@@ -303,7 +342,15 @@ def final_index(method: str, state: dict) -> int:
     return {"matrix": 3, "ach": 2, "forecasting": 3, "scenarios": 7}.get(method, 3 + len(state.get("criteria", [])))
 
 
-def advance(method: str, state: dict, index: int, values: dict[str, str]) -> dict:
+def advance(
+    method: str,
+    state: dict,
+    index: int,
+    values: dict[str, str],
+    *,
+    mapping: list[int | None] | None = None,
+    discard_scores: bool = False,
+) -> dict:
     """Return a fresh state after one validated step. Failure cannot mutate persisted data."""
     data = deepcopy(state)
     if index == final_index(method, data):
@@ -314,11 +361,27 @@ def advance(method: str, state: dict, index: int, values: dict[str, str]) -> dic
     if method == "matrix":
         if index == 0:
             names = distinct(lines(values["alternatives"]), "alternatives")
-            before = [row["name"] for row in data.get("alternatives", [])]
-            if before and before != names and data.get("criteria"):
-                raise ValueError("Scores exist; use Advanced JSON to revise alternatives without losing judgments")
+            existing = data.get("alternatives", [])
+            before = [row["name"] for row in existing]
             if before != names:
-                data["alternatives"] = [{"name": n, "scores": []} for n in names]
+                if matrix_has_scores(data) and mapping is None:
+                    raise MatrixMappingRequired(index, before, names)
+                if mapping is not None:
+                    checked_mapping(before, names, mapping)
+                    lost = [
+                        row["name"]
+                        for i, row in enumerate(existing)
+                        if i not in mapping and any(matrix_score_present(s) for s in row.get("scores", []))
+                    ]
+                    if lost and not discard_scores:
+                        raise ValueError("Confirm discarding scores for: " + ", ".join(lost))
+                sources = mapping if mapping is not None else matrix_mapping(before, names)
+                data["alternatives"] = [
+                    {**existing[source], "name": label, "scores": list(existing[source].get("scores", []))}
+                    if source is not None
+                    else {"name": label, "scores": []}
+                    for label, source in zip(names, sources, strict=True)
+                ]
         elif index == 1:
             rows = []
             for line in lines(values["criteria"]):
@@ -333,13 +396,31 @@ def advance(method: str, state: dict, index: int, values: dict[str, str]) -> dic
             distinct([r["name"] for r in rows], "criteria", 1)
             if sum(r["weight"] for r in rows) <= 0:
                 raise ValueError("Total weight must be positive")
-            previous = [(c["name"], c.get("direction")) for c in data.get("criteria", [])]
-            if (
-                previous
-                and previous != [(c["name"], c["direction"]) for c in rows]
-                and any(alt.get("scores") for alt in data.get("alternatives", []))
-            ):
-                raise ValueError("Scores exist; use Advanced JSON to revise criteria without losing judgments")
+            old_criteria = data.get("criteria", [])
+            before = [criterion["name"] for criterion in old_criteria]
+            after = [criterion["name"] for criterion in rows]
+            if before != after:
+                if matrix_has_scores(data) and mapping is None:
+                    raise MatrixMappingRequired(index, before, after)
+                if mapping is not None:
+                    checked_mapping(before, after, mapping)
+                    lost = [
+                        old_criteria[j]["name"]
+                        for j in range(len(old_criteria))
+                        if j not in mapping
+                        and any(
+                            j < len(alt.get("scores", [])) and matrix_score_present(alt["scores"][j])
+                            for alt in data.get("alternatives", [])
+                        )
+                    ]
+                    if lost and not discard_scores:
+                        raise ValueError("Confirm discarding scores for: " + ", ".join(lost))
+                sources = mapping if mapping is not None else matrix_mapping(before, after)
+                for alternative in data.get("alternatives", []):
+                    prior = alternative.get("scores", [])
+                    alternative["scores"] = (
+                        [prior[j] if j is not None and j < len(prior) else "" for j in sources] if prior else []
+                    )
             data["criteria"] = rows
         elif index == 2:
             for i, alt in enumerate(data["alternatives"]):

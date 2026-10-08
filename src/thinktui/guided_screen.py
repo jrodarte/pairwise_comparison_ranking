@@ -14,7 +14,16 @@ from textual.widgets import Button, Footer, Header, Input, Label, Static, TextAr
 from .context_offers import offers
 from .core import METHODS, Session, timestamp
 from .field_ai import FieldHelpMixin
-from .guided_workflow import GUIDED, advance, definition, final_index, next_index, reachable_index
+from .guided_workflow import (
+    GUIDED,
+    MatrixMappingRequired,
+    advance,
+    definition,
+    final_index,
+    next_index,
+    reachable_index,
+)
+from .matrix_mapping_screen import MatrixMappingDialog
 from .planning import planned_next
 from .reports import export, plain_result
 
@@ -86,7 +95,9 @@ class GuidedScreen(FieldHelpMixin, Screen):
                                     id=f"field-{field.key}",
                                     tooltip=f"{alternative['name']} · {criterion['name']}: your score matters to the ranking.",
                                 )
-                                yield Static("Your score, 0–10. Why: this criterion contributes to the ranking.", classes="muted")
+                                yield Static(
+                                    "Your score, 0–10. Why: this criterion contributes to the ranking.", classes="muted"
+                                )
                                 yield Static("", id=f"guided-error-{field.key}", classes="muted")
             else:
                 for field in step.fields:
@@ -250,11 +261,25 @@ class GuidedScreen(FieldHelpMixin, Screen):
 
     async def action_next(self) -> None:
         method = self.session.method_id
+        values = self.current_values()
         try:
-            state = advance(method, self.session.method_state, self.index, self.current_values())
+            state = advance(method, self.session.method_state, self.index, values)
+        except MatrixMappingRequired as request:
+            self.app.push_screen(
+                MatrixMappingDialog(self.session.method_state, request, values), self.mapping_confirmed
+            )
+            return
         except (ValueError, TypeError, KeyError, IndexError) as exc:
             self.notify(str(exc), severity="error")
             return
+        await self.commit_next(state)
+
+    def mapping_confirmed(self, state: dict | None) -> None:
+        if state is not None:
+            self.run_worker(self.commit_next(state), group="matrix-edit", exclusive=True)
+
+    async def commit_next(self, state: dict) -> None:
+        method = self.session.method_id
         is_review = self.index == final_index(method, state)
         self.index = next_index(method, state, self.index)
         state["_guided_step"] = self.index

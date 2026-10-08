@@ -42,9 +42,12 @@ class ThinkApp(App[None]):
     #results, #ai-response, #pair { height: auto; min-height: 2; margin: 1 0; }
     #ai-response { color: #91c7d8; }
     #ai-status { height: auto; color: #f0c674; text-style: bold; }
-    DeleteProjectDialog { align: center middle; background: #070d15 80%; }
+    DeleteProjectDialog, MatrixMappingDialog { align: center middle; background: #070d15 80%; }
     DeleteProjectDialog .dialog { width: 70%; max-width: 72; height: auto;
         border: round #b87c78; background: #1b3042; padding: 2 3; }
+    MatrixMappingDialog .matrix-dialog { width: 85%; max-width: 85; height: auto; max-height: 90%;
+        border: round #89bed7; background: #1b3042; padding: 1 2; }
+    MatrixMappingDialog .matrix-dialog-rows { height: auto; max-height: 18; }
     """
 
     def __init__(self, store: Store | None = None, initial: str = "home") -> None:

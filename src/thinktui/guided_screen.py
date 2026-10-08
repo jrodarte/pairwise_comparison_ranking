@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from textual.app import ComposeResult
@@ -14,7 +13,7 @@ from .context_offers import offers
 from .core import METHODS, Session, timestamp
 from .guided_workflow import GUIDED, advance, definition, final_index, next_index, reachable_index
 from .planning import planned_next
-from .reports import export
+from .reports import export, plain_result
 
 
 class GuidedScreen(Screen):
@@ -72,7 +71,7 @@ class GuidedScreen(Screen):
                     result = (
                         "Complete the missing judgments:\n" + "\n".join(issues)
                         if issues
-                        else json.dumps(method.calculate(self.session.method_state), indent=2, ensure_ascii=False)
+                        else plain_result(method.calculate(self.session.method_state))
                     )
                 except (ValueError, TypeError, KeyError) as exc:
                     result = "Review the analysis: " + str(exc)

@@ -64,6 +64,32 @@ def decision_brief(session: Session) -> str:
     )
 
 
+def plain_result(result: dict) -> str:
+    """Readable local calculation output for non-technical review screens."""
+    lines: list[str] = []
+
+    def show(value: object, depth: int = 0) -> None:
+        indent = "  " * depth
+        if isinstance(value, dict):
+            for key, entry in value.items():
+                label = key.replace("_", " ").capitalize()
+                if isinstance(entry, (dict, list)):
+                    lines.append(indent + label + ":")
+                    show(entry, depth + 1)
+                else:
+                    lines.append(f"{indent}{label}: {entry}")
+        elif isinstance(value, list):
+            for index, entry in enumerate(value, 1):
+                if isinstance(entry, (dict, list)):
+                    lines.append(f"{indent}{index}.")
+                    show(entry, depth + 1)
+                else:
+                    lines.append(f"{indent}{index}. {entry}")
+
+    show(result)
+    return "\n".join(lines)
+
+
 def export(session: Session, destination: Path) -> None:
     if destination.suffix.lower() == ".md":
         destination.write_text(decision_brief(session), encoding="utf-8")

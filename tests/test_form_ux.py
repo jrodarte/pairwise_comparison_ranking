@@ -10,6 +10,7 @@ from thinktui.core import METHODS, Session
 from thinktui.form_model import normalize_ids, parse, schema_for
 from thinktui.form_screen import FormScreen
 from thinktui.project_progress import checklist
+from thinktui.reports import plain_result
 from thinktui.screens import Workspace
 from thinktui.storage import Store
 
@@ -70,6 +71,12 @@ def test_project_question_migration_and_text_only_offers(tmp_path):
     assert offers("matrix", [Session(project, "value_focused", "Draft", method_state=source.method_state)], "new") == {}
 
 
+def test_guided_results_are_readable_not_raw_json():
+    result = plain_result({"ranking": [{"name": "Pilot", "score": 7.5}], "normalized_weights": [1.0]})
+    assert "Pilot" in result and "Normalized weights" in result
+    assert "{" not in result and '"score"' not in result
+
+
 def test_progress_only_counts_finished_analyses():
     draft = Session("p", "objectives", "Goals")
     rows, next_method = checklist([draft])
@@ -87,6 +94,10 @@ def test_numeric_and_date_validation():
         parse(field, "tomorrow")
     assert parse(field, "2030-01-01") == "2030-01-01"
     assert parse(schema_for("objectives")[0].children[1], "") is None
+    assert schema_for("hypothesis_tree")[1].children[-1].choices == ("hypothesis", "test")
+    assert parse(schema_for("assumption_mapping")[0].children[1], "0.3") == 0.3
+    with pytest.raises(ValueError):
+        parse(schema_for("assumption_mapping")[0].children[1], "30")
 
 
 @pytest.mark.asyncio
@@ -199,6 +210,45 @@ async def test_complete_structured_form_without_json(tmp_path, method_id, values
         app.screen.query_one("#form-export-path", Input).value = str(destination)
         app.screen.action_export()
         assert destination.exists() and session.title in destination.read_text()
+
+
+@pytest.mark.asyncio
+async def test_stopped_ai_partial_is_never_accepted(tmp_path, monkeypatch):
+    import asyncio
+
+    from textual.widgets import TextArea
+
+    from thinktui import form_screen
+
+    store = Store(tmp_path / "stop.db")
+    store.set_setting("ai_provider", "ollama")
+    session = Session(store.new_project("Plan"), "backcasting", "Future")
+    store.save(session)
+    waiting = asyncio.Event()
+
+    class SlowProvider:
+        async def stream(self, _request):
+            yield "Suggested future"
+            await waiting.wait()
+
+    async def connect(_):
+        return SlowProvider(), ProviderConfig("ollama", "http://localhost:11434", "fake")
+
+    monkeypatch.setattr(form_screen, "connect", connect)
+    app = ThinkApp(store=store)
+    async with app.run_test() as pilot:
+        app.open_session(session, guided=True)
+        await pilot.pause()
+        ident = next(i for i, (path, _) in app.screen.fields.items() if path == ("future_state",))
+        app.screen.suggest(ident)
+        await pilot.pause()
+        app.screen.accept()  # cannot accept streamed partial text
+        assert session.method_state == {}
+        app.screen.action_stop_ai()
+        assert app.screen.query_one("#form-preview", TextArea).text == "Suggested future"
+        app.screen.accept()
+        assert session.method_state == {}
+        waiting.set()
 
 
 @pytest.mark.asyncio

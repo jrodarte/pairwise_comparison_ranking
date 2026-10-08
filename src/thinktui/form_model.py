@@ -25,9 +25,17 @@ class FormField(Field):
 
 
 CHOICES = {
-    "kind": ("fundamental", "means"),
     "direction": ("benefit", "cost"),
     "rating": ("++", "+", "0", "-", "--", "?"),
+    "operation": ("product", "sum"),
+}
+KINDS = {
+    "objectives": ("fundamental", "means"),
+    "value_focused": ("fundamental", "means"),
+    "hypothesis_tree": ("hypothesis", "test"),
+    "decision_tree": ("chance", "decision"),
+    "fault_tree": ("AND", "OR"),
+    "monte_carlo": ("normal", "lognormal", "uniform", "triangular"),
 }
 BOUNDS = {
     "confidence": (0, 100),
@@ -101,8 +109,13 @@ def schema_for(method_id: str) -> tuple[FormField, ...]:
                 help=help_text,
                 why=why,
             )
-        if key in CHOICES:
+        choices = KINDS[method_id] if key == "kind" and method_id in KINDS else CHOICES.get(key, ())
+        if key == "direction" and method_id == "signposts":
+            choices = ("above", "below")
+        if choices or isinstance(value, bool):
             kind = "choice"
+            if isinstance(value, bool):
+                choices = ("Yes", "No")
         elif key.endswith("date") or key == "date":
             kind = "date"
         elif isinstance(value, (int, float)) and not isinstance(value, bool):
@@ -110,6 +123,10 @@ def schema_for(method_id: str) -> tuple[FormField, ...]:
         else:
             kind = "long_text" if key in LONG else "text"
         low, high = BOUNDS.get(key, (None, None))
+        if key == "confidence" and isinstance(value, float):
+            high = 1
+        if key in {"likelihood", "impact"} and method_id == "risk_matrix":
+            low, high = 1, 10
         if key == "scores":
             kind = "float"
         return FormField(
@@ -123,7 +140,7 @@ def schema_for(method_id: str) -> tuple[FormField, ...]:
             why=why,
             minimum=low,
             maximum=high,
-            choices=CHOICES.get(key, ()),
+            choices=choices,
         )
 
     return tuple(build(key, value, key) for key, value in example.items() if key not in HIDDEN)
@@ -167,6 +184,8 @@ def parse(field: FormField, raw: str) -> Any:
             raise ValueError(f"{field.label}: use YYYY-MM-DD") from None
     if field.kind == "choice" and value not in field.choices:
         raise ValueError(f"{field.label}: choose {', '.join(field.choices)}")
+    if field.choices == ("Yes", "No"):
+        return value == "Yes"
     return value
 
 

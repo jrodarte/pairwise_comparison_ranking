@@ -35,6 +35,7 @@ class FormScreen(Screen):
         self.ai_target: str | None = None
         self.ai_group: str | None = None
         self.ai_partial = ""
+        self.ai_ready = False
         self.invalid_fields: set[tuple[Any, ...]] = set()
 
     def compose(self) -> ComposeResult:
@@ -140,7 +141,7 @@ class FormScreen(Screen):
         self.fields[ident] = (path, field)
         yield Label(field.label, classes="heading")
         yield Static(field.help + " Why: " + field.why, classes="muted")
-        current = "" if value is None else str(value)
+        current = "" if value is None else ("Yes" if value else "No") if isinstance(value, bool) else str(value)
         if field.kind in {"choice", "reference"}:
             options = [("— Choose —", "")] + [(choice, choice) for choice in field.choices]
             if field.kind == "reference":
@@ -366,6 +367,7 @@ class FormScreen(Screen):
         if any(w.group == "form-ai" and w.is_running for w in self.workers):
             return
         self.ai_partial = ""
+        self.ai_ready = False
         self.query_one("#form-preview", TextArea).load_text("")
         self.query_one("#form-ai-status", Static).update("Connecting to AI… Ctrl+G stops.")
         self.run_worker(self.ask_ai(label, rows), group="form-ai", exclusive=True)
@@ -386,6 +388,7 @@ class FormScreen(Screen):
             context["state"] = deepcopy(self.draft)
             async for chunk in provider.stream(AIRequest(prompt, context)):
                 self.ai_partial += chunk
+                self.query_one("#form-preview", TextArea).load_text(visible_text(self.ai_partial))
                 status.update(
                     f"{describe(config)} · streaming {len(visible_text(self.ai_partial).split())} words · Ctrl+G stops"
                 )
@@ -394,11 +397,14 @@ class FormScreen(Screen):
                 status.update("AI returned empty or numeric text. Nothing was changed.")
                 return
             self.query_one("#form-preview", TextArea).load_text(answer)
+            self.ai_ready = True
             status.update("AI draft received · edit, Accept or Dismiss. Not saved.")
         except (RuntimeError, KeyError):
             status.update("AI unavailable. Your analysis is preserved.")
 
     def accept(self) -> None:
+        if not self.ai_ready or any(w.group == "form-ai" and w.is_running for w in self.workers):
+            return
         text = self.query_one("#form-preview", TextArea).text.strip()
         if not text or any(character.isdigit() for character in text):
             self.query_one("#form-ai-status", Static).update("Enter text only; numeric judgments are yours to supply.")
@@ -434,11 +440,16 @@ class FormScreen(Screen):
         else:
             return
         self.ai_target = self.ai_group = None
+        self.ai_ready = False
         self.query_one("#form-preview", TextArea).load_text("")
         self.query_one("#form-ai-status", Static).update("Accepted edited text; add your own judgments separately.")
 
     def action_stop_ai(self) -> None:
         if any(w.group == "form-ai" and w.is_running for w in self.workers):
             self.workers.cancel_group(self, "form-ai")
-            self.query_one("#form-ai-status", Static).update("AI stopped · partial text was not accepted or saved.")
-            self.query_one("#form-preview", TextArea).load_text("")
+            self.ai_ready = False
+            self.ai_target = self.ai_group = None
+            self.query_one("#form-ai-status", Static).update(
+                "AI stopped · partial answer visible, not accepted or saved."
+            )
+            self.query_one("#form-preview", TextArea).load_text(visible_text(self.ai_partial))

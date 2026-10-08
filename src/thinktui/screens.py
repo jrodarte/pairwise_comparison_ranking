@@ -60,6 +60,7 @@ from .issue_tree import toggle as tree_toggle
 from .issue_tree import visible as tree_visible
 from .planning import planned_next
 from .planning_screen import PlanningScreen
+from .project_progress import checklist
 from .reports import export
 
 
@@ -344,6 +345,11 @@ class ProjectView(Base):
             with Horizontal(classes="actions"):
                 yield Input(placeholder="Export snapshot to /path/to/backup.json", id="snapshot-path")
                 yield Button("Export project snapshot", id="export_snapshot")
+            progress, suggested = checklist(self.workbench.store.sessions(self.workbench.project_id))
+            yield Label("Planning progress · Why / Who / What / Where / When / How", classes="heading")
+            yield Static("\n".join(progress), classes="muted")
+            if suggested:
+                yield Button("Suggested next: " + METHODS[suggested].name, id="next-step")
             yield DataTable(id="analyses", cursor_type="row")
 
     def on_mount(self) -> None:
@@ -369,7 +375,12 @@ class ProjectView(Base):
         self.workbench.open_session(self.workbench.store.load(str(event.row_key.value)), guided=True)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "save-question":
+        if event.button.id == "next-step":
+            _, suggested = checklist(self.workbench.store.sessions(self.workbench.project_id))
+            if suggested:
+                self.workbench.method_id = suggested
+                self.workbench.switch_screen(NewAnalysis())
+        elif event.button.id == "save-question":
             self.workbench.store.set_planning_question(
                 self.workbench.project_id, self.query_one("#project-question", Input).value
             )
@@ -602,6 +613,7 @@ class Workspace(Base):
         ("ctrl+g", "stop_ai", "Stop AI"),
         ("ctrl+e", "export", "Export"),
         Binding("tab", "tree_toggle", "Fold / next", priority=True),
+        Binding("shift+enter", "tree_sibling", "Add sibling", priority=True),
     ]
 
     def compose(self) -> ComposeResult:
@@ -636,7 +648,7 @@ class Workspace(Base):
                     "matrix": 'Enter JSON: {"criteria":[{"name":"Value","weight":3,"direction":"benefit"}],"alternatives":[{"name":"A","scores":[8]},{"name":"B","scores":[6]}]}',
                     "assumptions": "Add one assumption at a time. Rate confidence 0–100 and impact 1–10. What would falsify it?",
                     "premortem": "Imagine it failed in 12 months. What went wrong? Add a cause and preventive action.",
-                    "issue_tree": "Select a branch. Enter edits its label; A child, S sibling, D delete subtree, Tab fold/unfold. Type a label before adding.",
+                    "issue_tree": "Select a branch, type a label, Enter adds its child; Shift+Enter adds a sibling. A/S/D work on the tree; Edit changes a label; Tab folds.",
                     "journal": "Record your reasoning now; later compare the actual outcome without conflating decision quality and luck.",
                 }
                 if hasattr(METHODS[session.method_id], "example"):
@@ -789,16 +801,12 @@ class Workspace(Base):
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "entry" and self.workbench.session.method_id == "issue_tree":
-            self.tree_action("edit" if self.tree_editing else "root")
+            self.tree_action("child" if self.selected_tree_node() else "root")
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         if event.data_table.id == "tree":
-            node = self.selected_tree_node()
-            if node:
-                self.tree_editing = node["id"]
-                editor = self.query_one("#entry", Input)
-                editor.value = node["label"]
-                editor.focus()
+            # Selection changes the target, never replaces a drafted label.
+            self.tree_editing = None
 
     def selected_tree_node(self) -> dict | None:
         table = self.query_one("#tree", DataTable)
@@ -880,7 +888,14 @@ class Workspace(Base):
         label_input.value = ""
         self.persist(f"Issue tree: {operation}")
         self.refresh_tree(selected)
-        self.query_one("#tree", DataTable).focus()
+        if operation in {"root", "child", "sibling"}:
+            label_input.focus()
+        else:
+            self.query_one("#tree", DataTable).focus()
+
+    def action_tree_sibling(self) -> None:
+        if self.workbench.session.method_id == "issue_tree" and self.query_one("#entry", Input).has_focus:
+            self.tree_action("sibling")
 
     def refresh_results(self) -> None:
         session = self.workbench.session
@@ -1222,7 +1237,7 @@ class Workspace(Base):
             self.compare("skip")
 
     def action_tree_toggle(self) -> None:
-        if self.workbench.session.method_id == "issue_tree" and self.query_one("#tree", DataTable).has_focus:
+        if self.workbench.session.method_id == "issue_tree" and self.selected_tree_node():
             self.tree_action("toggle")
         else:
             self.focus_next()

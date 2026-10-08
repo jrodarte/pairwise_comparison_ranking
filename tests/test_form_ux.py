@@ -1,7 +1,7 @@
 """Form regressions: blank drafts, legacy state and explicit example loading."""
 
 import pytest
-from textual.widgets import Button, Input, Select
+from textual.widgets import Button, DataTable, Input, Select
 
 from thinktui.ai import FakeAIProvider, ProviderConfig
 from thinktui.app import ThinkApp
@@ -9,6 +9,8 @@ from thinktui.context_offers import offers
 from thinktui.core import METHODS, Session
 from thinktui.form_model import normalize_ids, parse, schema_for
 from thinktui.form_screen import FormScreen
+from thinktui.project_progress import checklist
+from thinktui.screens import Workspace
 from thinktui.storage import Store
 
 
@@ -68,12 +70,50 @@ def test_project_question_migration_and_text_only_offers(tmp_path):
     assert offers("matrix", [Session(project, "value_focused", "Draft", method_state=source.method_state)], "new") == {}
 
 
+def test_progress_only_counts_finished_analyses():
+    draft = Session("p", "objectives", "Goals")
+    rows, next_method = checklist([draft])
+    assert "In progress" in rows[0]
+    assert next_method == "objectives"
+    draft.completed_at = "now"
+    rows, next_method = checklist([draft])
+    assert "Reviewed" in rows[0]
+    assert next_method == "issue_tree"
+
+
 def test_numeric_and_date_validation():
     field = schema_for("backcasting")[1]
     with pytest.raises(ValueError, match="YYYY-MM-DD"):
         parse(field, "tomorrow")
     assert parse(field, "2030-01-01") == "2030-01-01"
     assert parse(schema_for("objectives")[0].children[1], "") is None
+
+
+@pytest.mark.asyncio
+async def test_issue_tree_enter_adds_child_and_shift_enter_sibling(tmp_path):
+    store = Store(tmp_path / "tree.db")
+    session = Session(store.new_project("Plan"), "issue_tree", "Questions")
+    store.save(session)
+    app = ThinkApp(store=store)
+    async with app.run_test() as pilot:
+        app.open_session(session)
+        await pilot.pause()
+        assert isinstance(app.screen, Workspace)
+        editor = app.screen.query_one("#entry", Input)
+        editor.value = "Root"
+        editor.focus()
+        await pilot.press("enter")
+        editor.value = "Child?"
+        editor.focus()
+        await pilot.press("enter")
+        assert [node["label"] for node in session.method_state["nodes"]] == ["Root", "Child?"]
+        assert session.method_state["nodes"][1]["parent_id"] == session.method_state["nodes"][0]["id"]
+        editor.value = "Sibling?"
+        app.screen.query_one("#tree", DataTable).move_cursor(row=1)
+        assert editor.value == "Sibling?"
+        editor.focus()
+        await pilot.press("shift+enter")
+        assert session.method_state["nodes"][2]["parent_id"] == session.method_state["nodes"][0]["id"]
 
 
 @pytest.mark.asyncio

@@ -43,7 +43,11 @@ def test_project_question_migration_and_text_only_offers(tmp_path):
     project = store.new_project("Plan")
     store.set_planning_question(project, "What should we launch?")
     assert store.project(project)["planning_question"] == "What should we launch?"
-    assert store.snapshot(project)["project"]["planning_question"] == "What should we launch?"
+    snapshot = store.snapshot(project)
+    assert snapshot["project"]["planning_question"] == "What should we launch?"
+    invalid = {**snapshot, "project": {**snapshot["project"], "planning_question": 42}}
+    with pytest.raises(ValueError, match="planning question"):
+        store.import_snapshot(invalid)
     source = Session(
         project,
         "value_focused",

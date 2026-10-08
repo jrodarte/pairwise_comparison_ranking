@@ -179,6 +179,8 @@ class Store:
         project = data.get("project", {})
         if not isinstance(project, dict) or not isinstance(project.get("name"), str) or not project["name"].strip():
             raise ValueError("Snapshot needs a named project")
+        if not isinstance(project.get("planning_question", ""), str):
+            raise ValueError("Snapshot planning question must be text")
         analyses = data.get("sessions", [])
         events = data.get("events", [])
         if not isinstance(analyses, list) or not isinstance(events, list):

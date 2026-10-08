@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, VerticalScroll
 from textual.screen import Screen
 from textual.widgets import Button, Footer, Header, Input, Label, Select, Static, TextArea
@@ -23,7 +24,7 @@ class FormScreen(Screen):
         ("ctrl+s", "save", "Save"),
         ("ctrl+e", "export", "Export"),
         ("escape", "project", "Project"),
-        ("ctrl+g", "stop_ai", "Stop AI"),
+        Binding("ctrl+g", "stop_ai", "Stop AI", priority=True),
     ]
 
     def __init__(self, session: Session) -> None:

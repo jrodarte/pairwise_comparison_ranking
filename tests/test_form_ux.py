@@ -269,7 +269,7 @@ async def test_stopped_ai_partial_is_never_accepted(tmp_path, monkeypatch):
         await pilot.pause()
         app.screen.accept()  # cannot accept streamed partial text
         assert session.method_state == {}
-        app.screen.action_stop_ai()
+        await pilot.press("ctrl+g")
         assert app.screen.query_one("#form-preview", TextArea).text == "Suggested future"
         app.screen.accept()
         assert session.method_state == {}

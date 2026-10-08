@@ -281,6 +281,23 @@ async def test_guided_forecast_picker_resolves_older_forecast(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_project_question_survives_esc_and_has_history(tmp_path):
+    store = Store(tmp_path / "question.db")
+    project = store.new_project("Plan")
+    app = ThinkApp(store=store)
+    async with app.run_test() as pilot:
+        app.project_id = project
+        app.show_project()
+        await pilot.pause()
+        app.screen.query_one("#project-question", Input).value = "Which option is safest?"
+        await pilot.press("escape")
+        await pilot.pause()
+        assert store.project(project)["planning_question"] == "Which option is safest?"
+        assert len(store.project_events(project)) == 1
+    store.close()
+
+
+@pytest.mark.asyncio
 async def test_help_key_does_not_interrupt_typing(tmp_path):
     store = Store(tmp_path / "help.db")
     app = ThinkApp(store=store)

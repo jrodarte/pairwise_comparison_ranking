@@ -73,7 +73,7 @@ class ThinkApp(App[None]):
     .very-narrow .matrix-entry-row Input, .very-narrow .matrix-entry-row Select { width: 100%; }
     .very-narrow .matrix-entry-row Button { margin-left: 0; }
     .narrow .editor-pane { width: 100%; height: 2fr; }
-    .narrow .ai-pane { width: 100%; min-width: 0; height: 1fr; min-height: 9;
+    .narrow .ai-pane { width: 100%; min-width: 0; height: 1fr; min-height: 12;
         border-left: none; border-top: solid #397e76; }
     .field-editor { height: auto; width: 100%; align: left top; }
     .field-editor Input, .field-editor TextArea { width: 1fr; }

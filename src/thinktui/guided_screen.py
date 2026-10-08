@@ -146,7 +146,12 @@ class GuidedScreen(FieldHelpMixin, Screen):
                             else:
                                 yield Input(value=field.value, placeholder=field.label, id=f"field-{field.key}")
                             if self.can_suggest(field.key):
-                                yield Button("AI", id=f"help-suggest-{field.key}", classes="ai-trigger")
+                                yield Button(
+                                    "Draft text",
+                                    id=f"help-suggest-{field.key}",
+                                    classes="ai-trigger",
+                                    tooltip=f"Draft text for {field.label}; review and Accept before use",
+                                )
                         yield Static("", id=f"guided-error-{field.key}", classes="muted")
                 if step.review:
                     try:
@@ -314,7 +319,7 @@ class GuidedScreen(FieldHelpMixin, Screen):
         with Horizontal(classes="field-editor"):
             yield TextArea(self.matrix_bulk, id=f"field-{step.fields[0].key}")
             yield Button(
-                "AI",
+                "Suggest labels",
                 id=f"help-suggest-{step.fields[0].key}",
                 classes="ai-trigger",
                 tooltip="Draft labels in the bulk paste editor; review before using",

@@ -112,7 +112,7 @@ async def test_form_rows_trigger_beside_add_row_and_sidebar_scrolls_on_narrow_te
         assert suggest.tooltip
         pane = screen.query_one(".ai-pane", VerticalScroll)
         preview = screen.query_one("#form-preview", TextArea)
-        assert pane.region.height == 9
+        assert pane.region.height >= 12
         assert pane.max_scroll_y > 0
         preview.focus()
         await pilot.pause()

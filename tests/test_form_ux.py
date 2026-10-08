@@ -223,10 +223,13 @@ async def test_legacy_grid_rename_preserves_judgments_and_collision(tmp_path):
         method_state=deepcopy(METHODS["value_of_information"].example),
     )
     store.save(session)
+    events_before = len(store.events(session.id))
     app = ThinkApp(store=store)
     async with app.run_test() as pilot:
         app.open_session(session, guided=True)
         await pilot.pause()
+        assert len(store.events(session.id)) == events_before
+        assert type(store.load(session.id).method_state["actions"][0]["payoffs"]["Demand"]) is int
         screen = app.screen
         ident = next(i for i, (p, _) in screen.fields.items() if p == ("states", 0, "name"))
         editor = screen.query_one(f"#{ident}", Input)

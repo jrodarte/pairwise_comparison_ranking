@@ -247,6 +247,11 @@ class FormScreen(Screen):
         self.invalid_fields.discard(path)
         self.query_one(f"#error-{ident}", Static).update("")
         previous = self.value_at(path)
+        # Mounting a form is not a user edit. Keep legacy integer/float types and audit untouched.
+        if previous == value and (
+            type(previous) is type(value) or type(previous) in (int, float) and type(value) in (int, float)
+        ):
+            return
         self.put(path, value)
         if (path[0] == "states" and path[-1] == "name") or (path[0] == "scenarios" and len(path) == 2):
             if not value and previous:

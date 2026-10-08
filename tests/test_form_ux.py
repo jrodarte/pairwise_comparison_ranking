@@ -145,6 +145,60 @@ async def test_blank_form_example_opt_in_and_resume(tmp_path):
         )
         assert app.screen.query_one(Select)
         assert "{" not in str(app.screen.query_one("#form-results"))
+        await pilot.press("f6")
+        assert isinstance(app.screen, Workspace)
+        assert app.screen.query_one("#structured-input")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "method_id, values, row_values",
+    [
+        ("objectives", {}, {"nodes": [{"label": "Reliable service", "kind": "fundamental", "parent_id": None}]}),
+        (
+            "value_focused",
+            {},
+            {
+                "objectives": [
+                    {"name": "Quick delivery", "kind": "fundamental", "measure": "Lead time", "why": "Less waiting"}
+                ],
+                "alternatives": ["Pilot", "No change"],
+            },
+        ),
+        (
+            "backcasting",
+            {"future_state": "Self-service release", "target_date": "2030-01-01"},
+            {"milestones": [{"date": "2029-01-01", "requirement": "Run pilot", "owner": "Team"}]},
+        ),
+    ],
+)
+async def test_complete_structured_form_without_json(tmp_path, method_id, values, row_values):
+    store = Store(tmp_path / f"{method_id}.db")
+    session = Session(store.new_project("Project"), method_id, "Draft")
+    store.save(session)
+    app = ThinkApp(store=store)
+    async with app.run_test() as pilot:
+        app.open_session(session, guided=True)
+        await pilot.pause()
+        for key, value in values.items():
+            ident = next(i for i, (path, _) in app.screen.fields.items() if path == (key,))
+            app.screen.change(ident, value)
+        for key, rows in row_values.items():
+            group = next(i for i, path in app.screen.groups.items() if path == (key,))
+            for index, row in enumerate(rows):
+                app.screen.query_one(f"#{group}-add", Button).press()
+                await pilot.pause()
+                for field, value in row.items() if isinstance(row, dict) else [("value", row)]:
+                    path = (key, index) if field == "value" else (key, index, field)
+                    ident = next(i for i, (p, _) in app.screen.fields.items() if p == path)
+                    app.screen.change(ident, "" if value is None else value)
+        assert not METHODS[method_id].validate(session.method_state)
+        app.screen.action_save()
+        assert store.load(session.id).completed_at is not None
+        destination = tmp_path / f"{method_id}.md"
+        app.screen.query_one("#form-export-path", Input).value = str(destination)
+        app.screen.action_export()
+        assert destination.exists() and session.title in destination.read_text()
 
 
 @pytest.mark.asyncio

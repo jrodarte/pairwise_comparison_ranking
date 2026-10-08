@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from pathlib import Path
 from typing import Any
 
 from textual.app import ComposeResult
@@ -13,12 +14,14 @@ from textual.widgets import Button, Footer, Header, Input, Label, Select, Static
 from .ai import AIRequest, connect, context_for, describe, is_local, selected_provider, visible_text
 from .core import METHODS, Session, timestamp
 from .form_model import FormField, blank, draft_from_example, normalize_ids, parse, schema_for, title
+from .reports import export
 
 
 class FormScreen(Screen):
     BINDINGS = [
         ("f6", "advanced", "Advanced JSON"),
         ("ctrl+s", "save", "Save"),
+        ("ctrl+e", "export", "Export"),
         ("escape", "project", "Project"),
         ("ctrl+g", "stop_ai", "Stop AI"),
     ]
@@ -60,6 +63,8 @@ class FormScreen(Screen):
                 yield Button("Load example", id="load-example")
                 yield Button("Advanced JSON  F6", id="advanced")
                 yield Button("Project", id="project")
+            yield Input(placeholder="Export path: ~/decision.md or ~/decision.json", id="form-export-path")
+            yield Button("Export  Ctrl+E", id="form-export")
             yield Static("", id="form-error", classes="muted")
             yield Static("", id="form-results", classes="muted", markup=False)
             yield Static("AI is optional · suggestions are never saved without Accept.", classes="muted")
@@ -277,6 +282,8 @@ class FormScreen(Screen):
             self.preview_result()
         elif ident == "advanced":
             self.action_advanced()
+        elif ident == "form-export":
+            self.action_export()
         elif ident == "project":
             self.action_project()
         elif ident.startswith("suggest-rows-"):
@@ -323,6 +330,19 @@ class FormScreen(Screen):
 
     def action_advanced(self) -> None:
         self.app.open_session(self.session, advanced=True)
+
+    def action_export(self) -> None:
+        value = self.query_one("#form-export-path", Input).value.strip()
+        if not value:
+            self.query_one("#form-export-path", Input).focus()
+            self.notify("Enter an export path", severity="warning")
+            return
+        try:
+            export(self.session, Path(value).expanduser())
+        except (ValueError, OSError) as exc:
+            self.notify(str(exc), severity="error")
+            return
+        self.notify(f"Exported {value}")
 
     def action_project(self) -> None:
         self.app.show_project()

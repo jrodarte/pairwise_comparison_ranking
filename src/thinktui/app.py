@@ -7,9 +7,9 @@ from textual.binding import Binding
 
 from . import methods as _methods  # noqa: F401 - register method plugins
 from .core import METHODS, Session
+from .form_screen import FormScreen
 from .guided_screen import GuidedScreen
 from .guided_workflow import GUIDED
-from .form_screen import FormScreen
 from .screens import Home, JournalList, Library, NewProject, ProjectView, Settings, Workspace
 from .storage import Store
 

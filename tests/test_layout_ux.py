@@ -47,7 +47,7 @@ async def test_editor_and_ai_pane_responsive(tmp_path, method_id, guided, trigge
         await pilot.pause()
         assert screen.query_one(".workspace-layout").has_class("narrow")
         assert ai.region.y >= editor.region.bottom
-        assert ai.region.width == editor.region.width == 80
+        assert ai.region.width == editor.region.width == screen.query_one(".workspace-layout").region.width >= 77
         await pilot.resize_terminal(120, 40)
         await pilot.pause()
         assert not screen.query_one(".workspace-layout").has_class("narrow")

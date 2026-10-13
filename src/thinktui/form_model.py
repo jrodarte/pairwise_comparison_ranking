@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
+from .catalog_decisions import TEST_RESULTS
 from .core import ASSUMPTION_STATUSES, METHODS
 from .guided_workflow import Field
 
@@ -56,6 +57,7 @@ ENUM_CHOICES = {
     ("forecasting", "outcome"): ("Unresolved", "No", "Yes"),
     ("causal_loop", "polarity"): ("Reinforcing (+1)", "Balancing (-1)"),
     ("assumption_mapping", "status"): ASSUMPTION_STATUSES,
+    ("hypothesis_tree", "result"): TEST_RESULTS,
 }
 KINDS = {
     "objectives": ("fundamental", "means"),
@@ -183,8 +185,41 @@ PATH_LABELS = {
     ("fmea", "failure_modes.action"): ("Recommended action", "What you will do to reduce the risk."),
     ("hypothesis_tree", "nodes.label"): ("Hypothesis or test", "State the hypothesis or the test."),
     ("value_focused", "objectives.why"): ("Why does it matter?", "The deeper value this objective serves."),
+    ("objectives", "nodes"): ("Objectives", ""),
+    ("objectives", "nodes.label"): ("Objective", "State one outcome you want, e.g. Customer value."),
+    ("objectives", "nodes.kind"): (
+        "Fundamental or means?",
+        "Fundamental = valued for its own sake; means = matters because it achieves another objective.",
+    ),
+    ("hypothesis_tree", "nodes"): ("Hypotheses and tests", ""),
+    ("hypothesis_tree", "nodes.result"): (
+        "Test result",
+        "Untested = not run yet; Supports / Contradicts = what the test showed about its parent hypothesis.",
+    ),
+    ("fmea", "failure_modes.item"): (
+        "Item / process step",
+        "The component, function or process step that can fail, e.g. Checkout service.",
+    ),
+    ("root_cause", "problem"): (
+        "Problem being analysed",
+        "The specific failure or symptom to explain, e.g. Timeouts after deploy. Narrower than the planning question.",
+    ),
+    ("five_whys", "problem"): (
+        "Problem being analysed",
+        "The specific failure or symptom to explain, e.g. Deploy delayed. Narrower than the planning question.",
+    ),
+    ("bow_tie", "threats.escalation_factors"): (
+        "Escalation factors (optional)",
+        "Conditions that could make these preventive controls fail, e.g. the fallback shares the vendor's region.",
+    ),
+    ("bow_tie", "consequences.escalation_factors"): (
+        "Escalation factors (optional)",
+        "Conditions that could make these mitigating controls fail, e.g. the queue fills during a long outage.",
+    ),
     ("signposts", "indicators.current"): ("Current reading", "Latest observed value, if known."),
 }
+# Singular row name where the stored key ("nodes") is not what the user is adding.
+ROW_ITEMS = {("objectives", "nodes"): "Objective", ("hypothesis_tree", "nodes"): "Hypothesis or test"}
 # Optional fields: blank is accepted and the label says so.
 OPTIONAL_PATHS = {
     ("assumption_mapping", "assumptions.basis"),
@@ -202,6 +237,8 @@ OPTIONAL_PATHS = {
     ("forecasting", "forecasts.resolution_date"),
     ("forecasting", "forecasts.rationale"),
     ("value_focused", "objectives.why"),
+    ("fmea", "failure_modes.item"),
+    ("hypothesis_tree", "nodes.result"),
 }
 SINGULAR = {
     "hypotheses": "Hypothesis",
@@ -233,6 +270,7 @@ SINGULAR = {
     "milestones": "Milestone",
     "objectives": "Objective",
     "failure_modes": "Failure mode",
+    "escalation_factors": "Escalation factor",
     "assumptions": "Assumption",
     "risks": "Risk",
     "threats": "Threat",
@@ -468,7 +506,9 @@ def schema_for(method_id: str) -> tuple[FormField, ...]:
     def build(key: str, value: Any, path: str) -> FormField:
         # A scalar list's "value" child is one item of its parent, e.g. one Hypothesis.
         label = singular(path.rsplit(".", 1)[-1]) if key == "value" else KEY_LABELS.get(key, title(key))
-        label, custom_help = PATH_LABELS.get((method_id, path), (label, ""))
+        path_label, custom_help = PATH_LABELS.get((method_id, path), (label, ""))
+        # One item of a list keeps its singular name; only its help comes from the list's entry.
+        label = label if key == "value" and (method_id, path) in PATH_LABELS else path_label
         if method_id in {"decision_tree", "fault_tree"} and path == "tree":
             return FormField(
                 key,
@@ -529,9 +569,9 @@ def schema_for(method_id: str) -> tuple[FormField, ...]:
                 label,
                 kind="rows",
                 children=children,
-                help=f"Add as many {label.lower()} as you need.",
+                help=custom_help or f"Add as many {label.lower()} as you need.",
                 why=why,
-                item_label=singular(key),
+                item_label=ROW_ITEMS.get((method_id, path), singular(key)),
             )
         if isinstance(value, dict):
             if (method_id, path) in KEYED_GRIDS:
@@ -679,6 +719,7 @@ def schema_for(method_id: str) -> tuple[FormField, ...]:
             choices=choices,
             reference=reference,
             optional=optional,
+            show_for=("test",) if (method_id, path) == ("hypothesis_tree", "nodes.result") else (),
         )
 
     return tuple(build(key, value, key) for key, value in example.items() if key not in HIDDEN)

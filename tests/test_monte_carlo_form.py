@@ -53,7 +53,10 @@ def test_distribution_choices_and_other_validator_enums_are_complete():
         tree = next(item for item in schema_for(method_id) if item.key == "tree")
         kind = next(item for item in tree.children if item.key == "type")
         assert kind.kind == "choice" and set(kind.choices) == accepted
-    assert set(schema_for("hypothesis_tree")[1].children[-1].choices) == {"hypothesis", "test"}
+    assert set(next(c for c in schema_for("hypothesis_tree")[1].children if c.key == "kind").choices) == {
+        "hypothesis",
+        "test",
+    }
     assert set(schema_for("bradley_terry")[1].children[-1].choices) == {"a_wins", "b_wins", "tie"}
     assert set(schema_for("signposts")[0].children[3].choices) == {"above", "below"}
     outcomes = schema_for("forecasting")[0].children

@@ -100,7 +100,10 @@ def test_numeric_and_date_validation():
         parse(field, "tomorrow")
     assert parse(field, "2030-01-01") == "2030-01-01"
     assert parse(schema_for("objectives")[0].children[1], "") is None
-    assert schema_for("hypothesis_tree")[1].children[-1].choices == ("hypothesis", "test")
+    assert next(c for c in schema_for("hypothesis_tree")[1].children if c.key == "kind").choices == (
+        "hypothesis",
+        "test",
+    )
     assert schema_for("bradley_terry")[1].children[-1].choices == ("a_wins", "b_wins", "tie")
     assert schema_for("bradley_terry")[1].children[-1].kind == "choice"
     confidence = next(child for child in schema_for("assumption_mapping")[0].children if child.key == "confidence")

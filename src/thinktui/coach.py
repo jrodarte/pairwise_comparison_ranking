@@ -284,6 +284,24 @@ class Coach:
         self.refresh()
 
 
+class CoachStrip(Static):
+    """Collapsed co-planner: a thin edge strip on every full screen; click it (or press F10) to reopen."""
+
+    DEFAULT_CSS = """
+    CoachStrip { dock: right; width: 3; height: 1fr; background: $primary; color: $background;
+        content-align: center middle; text-style: bold; }
+    CoachStrip:hover { background: $secondary; }
+    """
+
+    def __init__(self) -> None:
+        super().__init__("◂\n\nC\no\n-\np\nl\na\nn\n\nF\n1\n0", id="coach-strip")
+        self.tooltip = "Show the AI co-planner (F10)"
+
+    def on_click(self, event) -> None:
+        event.stop()
+        self.app.action_coach()
+
+
 class CoachPanel(Vertical):
     """Docked beside every full screen while the co-planner is open (F10)."""
 
@@ -308,6 +326,10 @@ class CoachPanel(Vertical):
     CoachPanel Horizontal { height: auto; }
     CoachPanel Button { min-width: 6; margin-right: 1; }
     CoachPanel #coach-proposal-box { height: auto; }
+    CoachPanel .coach-header { height: auto; margin-top: 1; }
+    CoachPanel #coach-close { width: auto; min-width: 4; height: 1; min-height: 1; border: none;
+        padding: 0 1; margin: 0; background: $panel; color: $text-muted; }
+    CoachPanel #coach-close:hover, CoachPanel #coach-close:focus { background: $error; color: $background; }
     """
 
     def __init__(self) -> None:
@@ -320,7 +342,9 @@ class CoachPanel(Vertical):
 
     def compose(self) -> ComposeResult:
         yield Static("⋮", classes="coach-resize-handle")
-        yield Label("AI co-planner · F10 hides", classes="heading")
+        with Horizontal(classes="coach-header"):
+            yield Label("AI co-planner", classes="heading")
+            yield Button("✕ Close  F10", id="coach-close", tooltip="Close the co-planner; your conversation is kept")
         with Horizontal(classes="coach-size-controls"):
             yield Button("− Width", id="coach-narrower")
             yield Button("+ Width", id="coach-wider")
@@ -389,6 +413,8 @@ class CoachPanel(Vertical):
             event.stop()
 
     def on_mount(self) -> None:
+        for ident in ("#coach-narrower", "#coach-wider"):
+            self.query_one(ident, Button).active_effect_duration = 0  # Rapid clicks keep resizing.
         minimum, maximum = self._width_bounds()
         initial = self.app.coach_width
         # Leave room to grow as well as shrink when opening on a small screen.
@@ -464,7 +490,9 @@ class CoachPanel(Vertical):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         event.stop()
         ident = event.button.id
-        if ident == "coach-narrower":
+        if ident == "coach-close":
+            self.app.action_coach()
+        elif ident == "coach-narrower":
             self._set_width(self.app.coach_width - 6)
         elif ident == "coach-wider":
             self._set_width(self.app.coach_width + 6)

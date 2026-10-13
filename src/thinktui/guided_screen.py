@@ -34,7 +34,7 @@ from .planning import planned_next, sensitivity_from_matrix, sensitivity_pair
 from .reports import export, plain_result
 from .safe_widgets import Label, Select, Static
 from .text_field import TextField
-from .workspace_layout import WorkspaceLayout
+from .workspace_layout import WorkspaceLayout, ai_pane_header
 
 
 class GuidedScreen(CoachHost, FieldHelpMixin, Screen):
@@ -271,7 +271,7 @@ class GuidedScreen(CoachHost, FieldHelpMixin, Screen):
                     yield Button("Project  Esc", id="project")
             yield Static("⋮", classes="pane-handle")
             with VerticalScroll(classes="ai-pane"):
-                yield Static("AI draft · review before accepting", classes="heading")
+                yield ai_pane_header("AI draft · review before accepting")
                 yield Static(
                     "REMOTE → selected provider unless local. Sharing: method, problem, objective, assumptions and full method state. Not notes or history.",
                     classes="muted",

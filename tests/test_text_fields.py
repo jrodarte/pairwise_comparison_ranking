@@ -144,11 +144,52 @@ async def test_form_rows_collapse_expand_and_keep_state_when_rows_change(tmp_pat
 
         screen.query_one(f"#{group}-collapseall", Button).press()
         await pilot.pause()
-        assert all(row.collapsed for row in screen.query(Collapsible))
+        assert all(row.collapsed for row in screen.query(Collapsible).filter(".form-row"))
         screen.query_one(f"#{group}-expandall", Button).press()
         await pilot.pause()
-        assert not any(row.collapsed for row in screen.query(Collapsible))
+        assert not any(row.collapsed for row in screen.query(Collapsible).filter(".form-row"))
         assert [c["claim"][:8] for c in store.load(session.id).method_state["causes"]] == ["Bad depl", "Pool exh"]
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_form_sections_collapse_and_keep_state_when_fields_recompose(tmp_path):
+    store = Store(tmp_path / "sections.db")
+    session = Session(
+        store.new_project("Plan"),
+        "objectives",
+        "Goals",
+        method_state={"nodes": [{"id": "value", "parent_id": None, "label": "Customer value", "kind": "fundamental"}]},
+    )
+    store.save(session)
+    app = ThinkApp(store=store)
+    async with app.run_test(size=(120, 60)) as pilot:
+        app.switch_screen(FormScreen(session))
+        await pilot.pause()
+        screen = app.screen
+        titles = [str(section.title) for section in screen.query(Collapsible).filter(".form-section")]
+        assert titles == [
+            "Framing · planning question and decision purpose",
+            "Objectives · 1",
+            "Overall: what would change your mind? (optional)",
+        ]
+        assert "+ Add objective" in [str(button.label) for button in screen.query(Button)]
+
+        screen.query_one("#section-nodes", Collapsible).collapsed = True
+        await pilot.pause()
+        assert screen.collapsed_sections == {"nodes"}
+        await screen.recompose_fields()
+        await pilot.pause()
+        assert screen.query_one("#section-nodes", Collapsible).collapsed  # survives recomposition
+        assert not screen.query_one("#section-framing", Collapsible).collapsed
+
+        screen.query_one("#sections-expandall", Button).press()
+        await pilot.pause()
+        assert not any(section.collapsed for section in screen.query(Collapsible).filter(".form-section"))
+        screen.query_one("#sections-collapseall", Button).press()
+        await pilot.pause()
+        assert all(section.collapsed for section in screen.query(Collapsible).filter(".form-section"))
+        assert screen.collapsed_sections == {"framing", "nodes", "change_mind"}
     store.close()
 
 

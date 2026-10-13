@@ -153,6 +153,87 @@ def test_catalog_calculations_report_new_fields_without_inventing_them():
     assert adjusted["your_adjusted_estimate"] == 5 and adjusted["outside_view_median"] == 6
 
 
+def test_method_fields_cover_item_test_results_and_escalation_factors():
+    def children(method_id: str, group: str) -> dict:
+        return {c.key: c for c in next(f for f in schema_for(method_id) if f.key == group).children}
+
+    item = children("fmea", "failure_modes")["item"]
+    assert item.label == "Item / process step (optional)" and item.optional
+    result = children("hypothesis_tree", "nodes")["result"]
+    assert result.choices == ("Untested", "Supports", "Contradicts", "Inconclusive") and result.show_for == ("test",)
+    for group in ("threats", "consequences"):
+        factors = children("bow_tie", group)["escalation_factors"]
+        assert factors.label == "Escalation factors (optional)" and factors.children[0].label == "Escalation factor"
+    assert {f.key: f.label for f in schema_for("root_cause")}["problem"] == "Problem being analysed"
+    assert {f.key: f.label for f in schema_for("five_whys")}["problem"] == "Problem being analysed"
+    objectives = schema_for("objectives")[0]
+    assert (objectives.label, objectives.item_label) == ("Objectives", "Objective")
+
+
+def test_new_method_fields_are_optional_and_calculated_without_inventing_results():
+    row = {k: v for k, v in METHODS["fmea"].example["failure_modes"][0].items() if k != "item"}
+    assert METHODS["fmea"].calculate({"failure_modes": [row]})["ranking"][0]["rpn"] == 216  # older rows still work
+    with_item = METHODS["fmea"].calculate({"failure_modes": [{**row, "item": "Checkout"}]})
+    assert with_item["ranking"][0]["item"] == "Checkout"
+    with pytest.raises(ValueError, match="Item"):
+        METHODS["fmea"].calculate({"failure_modes": [{**row, "item": 3}]})
+
+    nodes = [
+        {"id": "h", "parent_id": None, "label": "Cache", "kind": "hypothesis"},
+        {"id": "t1", "parent_id": "h", "label": "Trace", "kind": "test", "result": "Contradicts"},
+        {"id": "t2", "parent_id": "h", "label": "Load test", "kind": "test"},
+        {"id": "t3", "parent_id": "h", "label": "Logs", "kind": "test", "result": None},
+    ]
+    tree = METHODS["hypothesis_tree"].calculate({"question": "Why slow?", "nodes": nodes})
+    assert tree["test_results"] == {"Cache": {"Untested": 2, "Supports": 0, "Contradicts": 1, "Inconclusive": 0}}
+    assert tree["untested"] == ["Trace", "Load test", "Logs"][1:]
+    assert tree["hypotheses"][0]["children"][0]["result"] == "Contradicts"
+    # A result left on a node later changed to a hypothesis is kept but not counted.
+    stale = [{**nodes[0], "result": "Supports"}, nodes[1]]
+    assert (
+        METHODS["hypothesis_tree"].calculate({"question": "Why?", "nodes": stale})["test_results"]["Cache"]["Supports"]
+        == 0
+    )
+    with pytest.raises(ValueError, match="Test result"):
+        METHODS["hypothesis_tree"].calculate({"question": "Why?", "nodes": [nodes[0], {**nodes[1], "result": "Yes"}]})
+
+    bow = {
+        "hazard": "API",
+        "top_event": "Down",
+        "threats": [{"name": "Outage", "preventive_controls": ["Fallback"], "escalation_factors": ["Same region"]}],
+        "consequences": [{"name": "Lost requests", "mitigating_controls": ["Queue"]}],
+    }
+    assert METHODS["bow_tie"].calculate(bow)["without_escalation_factors"] == ["Lost requests"]
+    with pytest.raises(ValueError, match="Escalation"):
+        METHODS["bow_tie"].calculate({**bow, "threats": [{**bow["threats"][0], "escalation_factors": [" "]}]})
+    validate_state("bow_tie", bow)
+    validate_state("hypothesis_tree", {"question": "Why?", "nodes": nodes})
+
+
+@pytest.mark.asyncio
+async def test_hypothesis_tree_shows_test_result_only_for_tests(tmp_path):
+    store = Store(tmp_path / "tree.db")
+    nodes = [
+        {"id": "h", "parent_id": None, "label": "Cache", "kind": "hypothesis"},
+        {"id": "t", "parent_id": "h", "label": "Trace", "kind": "test"},
+    ]
+    session = Session(store.new_project("Plan"), "hypothesis_tree", "Slow", method_state={"nodes": nodes})
+    store.save(session)
+    app = ThinkApp(store=store)
+    async with app.run_test(size=(120, 60)) as pilot:
+        app.switch_screen(FormScreen(session))
+        await pilot.pause()
+        screen = app.screen
+        results = [path for path, field in screen.fields.values() if field.key == "result"]
+        assert results == [("nodes", 1, "result")]
+        kind = next(i for i, (p, _) in screen.fields.items() if p == ("nodes", 0, "kind"))
+        screen.query_one(f"#{kind}", Select).value = "test"
+        await pilot.pause()
+        results = [path for path, field in screen.fields.values() if field.key == "result"]
+        assert results == [("nodes", 0, "result"), ("nodes", 1, "result")]
+    store.close()
+
+
 @pytest.mark.asyncio
 async def test_key_assumptions_editor_new_edit_cancel_and_per_entry_change_mind(tmp_path):
     store = Store(tmp_path / "kac.db")
@@ -320,6 +401,7 @@ async def test_schema_form_uses_plus_add_buttons_item_headings_and_overall_chang
         assert "+ Add driving force" in [str(button.label) for button in screen.query(Button)]
         assert "Scenario · Flat demand × Rules high" in labels
         assert "Axis 1 · Demand" in [str(row.title) for row in screen.query(Collapsible)]
-        change_mind = labels.index("Overall: what would change your mind? (optional)")
-        assert change_mind > labels.index("Scenario · Boom × Rules high")
+        sections = [str(section.title) for section in screen.query(Collapsible).filter(".form-section")]
+        assert sections[-1] == "Overall: what would change your mind? (optional)"  # after the scenarios
+        assert sections.index("Scenarios") < len(sections) - 1
     store.close()

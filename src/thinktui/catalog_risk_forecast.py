@@ -178,8 +178,20 @@ class BowTie(StructuredMethod):
     example = {
         "hazard": "Critical API dependency",
         "top_event": "API unavailable",
-        "threats": [{"name": "Vendor outage", "preventive_controls": ["Fallback"]}],
-        "consequences": [{"name": "Lost requests", "mitigating_controls": ["Queue and replay"]}],
+        "threats": [
+            {
+                "name": "Vendor outage",
+                "preventive_controls": ["Fallback"],
+                "escalation_factors": ["Fallback shares the vendor's region"],
+            }
+        ],
+        "consequences": [
+            {
+                "name": "Lost requests",
+                "mitigating_controls": ["Queue and replay"],
+                "escalation_factors": ["Queue fills during a long outage"],
+            }
+        ],
     }
 
     def calculate(self, state: dict) -> dict:
@@ -194,12 +206,22 @@ class BowTie(StructuredMethod):
                     not isinstance(v, str) or not v.strip() for v in row[controls]
                 ):
                     raise ValueError(f"{controls} must be a list of named controls")
+                factors = row.get("escalation_factors", [])
+                if not isinstance(factors, list) or any(not isinstance(v, str) or not v.strip() for v in factors):
+                    raise ValueError("Escalation factors must be a list of named conditions")
         return {
             "hazard": state["hazard"],
             "top_event": state["top_event"],
             "left_threats": state["threats"],
             "right_consequences": state["consequences"],
-            "note": "Controls are user-identified; effectiveness is not assumed.",
+            "without_escalation_factors": [
+                row["name"]
+                for field in ("threats", "consequences")
+                for row in state[field]
+                if row.get("escalation_factors") in (None, [])
+            ],
+            "note": "Controls are user-identified; effectiveness is not assumed. Escalation factors are conditions "
+            "that could make a control fail; a threat or consequence listed without any has not been challenged yet.",
         }
 
 

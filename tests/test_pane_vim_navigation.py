@@ -27,26 +27,95 @@ async def test_pane_toggle_and_focus_at_both_widths(tmp_path, mode):
         handle = layout.query_one(".pane-handle")
         field = editor.query_one(Input) if editor.query(Input) else editor.query_one(TextArea)
         field.focus()
-        await pilot.press("ctrl+1")
+        await pilot.press("shift+f5")
         await pilot.pause()
-        assert not editor.display and ai.display and not handle.display
+        assert not editor.display and ai.display and handle.has_class("collapsed")
         assert app.focused not in editor.query("*")
-        assert ai.region.width == layout.region.width
-        await pilot.press("ctrl+2")  # switch which pane is hidden
+        assert ai.region.width == layout.region.width - handle.region.width
+        await pilot.press("f5")  # switch which pane is hidden
         await pilot.pause()
         assert editor.display and not ai.display
-        assert editor.region.width == layout.region.width
+        assert editor.region.width == layout.region.width - handle.region.width
         await pilot.press("ctrl+0")
         await pilot.pause()
-        assert editor.display and ai.display and handle.display
+        assert editor.display and ai.display and not handle.has_class("collapsed")
         await pilot.resize_terminal(80, 40)
         await pilot.pause()
-        await pilot.press("ctrl+2")
+        await pilot.press("f5")
         await pilot.pause()
-        assert not ai.display and editor.region.height == layout.region.height
-        await pilot.press("ctrl+2")
+        assert not ai.display and editor.region.height == layout.region.height - handle.region.height
+        await pilot.press("ctrl+@")  # how Ctrl+2 arrives from tmux and legacy terminals
         await pilot.pause()
-        assert ai.display and handle.display
+        assert ai.display and not handle.has_class("collapsed")
+    store.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["advanced", "form", "guided"])
+@pytest.mark.parametrize("size", [(120, 40), (80, 40)])
+async def test_ai_pane_hide_button_and_restore_strip(tmp_path, mode, size):
+    store = Store(tmp_path / "hide.db")
+    method = "pairwise" if mode == "advanced" else "matrix"
+    session = Session(store.new_project("Example"), method, "Test")
+    app = ThinkApp(store=store)
+    async with app.run_test(size=size) as pilot:
+        app.open_session(session, advanced=mode == "advanced", guided=mode != "advanced")
+        await pilot.pause()
+        layout = app.screen.query_one(WorkspaceLayout)
+        ai = layout.query_one(".ai-pane")
+        handle = layout.query_one(".pane-handle")
+        hide = ai.query_one("#hide-ai-pane", Button)
+        hide.focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert not ai.display and handle.has_class("collapsed")
+        assert app.focused is not None and app.focused not in ai.query("*")
+        await pilot.click(handle)
+        await pilot.pause()
+        assert ai.display and not handle.has_class("collapsed")
+    store.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["advanced", "form", "guided"])
+async def test_ai_pane_hide_button_stays_visible_when_scrolled(tmp_path, mode):
+    store = Store(tmp_path / "scroll.db")
+    method = "assumptions" if mode == "form" else "pairwise" if mode == "advanced" else "matrix"
+    session = Session(store.new_project("Example"), method, "Test")
+    app = ThinkApp(store=store)
+    async with app.run_test(size=(110, 16)) as pilot:
+        app.open_session(session, advanced=mode == "advanced", guided=mode != "advanced")
+        await pilot.pause()
+        ai = app.screen.query_one(".ai-pane")
+        ai.scroll_end(animate=False)
+        await pilot.pause()
+        hide = ai.query_one("#hide-ai-pane", Button)
+        assert ai.region.contains_region(hide.region)
+        await pilot.click(hide)
+        await pilot.pause()
+        assert not ai.display
+    store.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(120, 40), (80, 40)])
+async def test_ai_pane_size_buttons_resize_without_dragging(tmp_path, size):
+    store = Store(tmp_path / "size.db")
+    session = Session(store.new_project("Example"), "matrix", "Test")
+    app = ThinkApp(store=store)
+    async with app.run_test(size=size) as pilot:
+        app.open_session(session, guided=True)
+        await pilot.pause()
+        ai = app.screen.query_one(".ai-pane")
+        extent = (lambda: ai.region.height) if size[0] < 100 else (lambda: ai.region.width)
+        original = extent()
+        await pilot.click(ai.query_one("#ai-pane-larger", Button))
+        await pilot.pause()
+        assert extent() > original
+        for _ in range(2):
+            await pilot.click(ai.query_one("#ai-pane-smaller", Button))
+            await pilot.pause()
+        assert extent() < original
     store.close()
 
 
@@ -81,7 +150,7 @@ async def test_vim_focus_panes_and_text_entry(tmp_path):
         await pilot.pause()
         await pilot.press("k")
         assert app.focused is editor.query_one("#items", TextArea)
-        await pilot.press("ctrl+2", "l")
+        await pilot.press("f5", "l")
         assert app.focused is editor or app.focused in editor.query("*")
     store.close()
 

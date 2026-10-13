@@ -18,6 +18,7 @@ from textual.screen import ModalScreen, Screen
 from textual.widgets import (
     Button,
     Checkbox,
+    Collapsible,
     Footer,
     Header,
     Input,
@@ -70,7 +71,7 @@ from .reports import export
 from .safe_widgets import DataTable, Label, Select, Static
 from .text_field import TextField
 from .themes import THEME_CHOICES
-from .workspace_layout import WorkspaceLayout
+from .workspace_layout import WorkspaceLayout, ai_pane_header
 
 
 class AIStatus(Static):
@@ -177,8 +178,8 @@ class HelpDialog(ModalScreen[None]):
                 "Ctrl+O: Home · Ctrl+P: Methods · Ctrl+N: New project · Esc: go back.\n"
                 "Project: F2 rename analysis · Del delete analysis · Ctrl+D duplicate · Ctrl+M move.\n"
                 "Forms: Ctrl+S calculate / finish · F6 Advanced JSON · Ctrl+E export · F9 explain results with AI.\n"
-                "F10: show or hide the AI co-planner (P on Home starts a guided walkthrough).\n"
-                "Analysis panes: Ctrl+1 editor · Ctrl+2 AI (toggle hide/show) · Ctrl+0 both.\n"
+                "F10, ✕ Close or the right-edge strip: show or hide the AI co-planner (P on Home starts a guided walkthrough).\n"
+                "Analysis panes: F5 hides/shows AI (or ✕ Hide) · Shift+F5 hides/shows editor · click the collapsed strip to restore.\n"
                 "Vim-like navigation outside text fields: J/K next/previous focus or list row; "
                 "H/L editor/AI pane (or table column). Tab/Shift+Tab always work.\n"
                 "Guided: F7 previous · F8 or Ctrl+S validate/next · F6 Advanced JSON.\n"
@@ -1158,21 +1159,23 @@ class Workspace(FieldHelpMixin, Base):
                             ("actual_outcome", "Actual outcome (at review)"),
                             ("lessons", "Lessons learned (at review)"),
                         )
-                        for field, hint in now_fields:
-                            yield Label(hint, classes="heading")
-                            yield journal_field(session, field, hint)
-                        yield Label("Rationale · Why this choice?", classes="heading")
-                        yield TextField(
-                            str(session.method_state.get("rationale", "")), multiline=True, id="journal-rationale"
-                        )
-                        yield Label("At the review date", classes="heading")
-                        yield Static(
-                            "Fill these in later. Judge the decision by what was knowable then, not only by the outcome.",
-                            classes="muted",
-                        )
-                        for field, hint in review_fields:
-                            yield Label(hint, classes="heading")
-                            yield journal_field(session, field, hint)
+                        with Collapsible(title="Record the decision now", collapsed=False, classes="form-section"):
+                            for field, hint in now_fields:
+                                yield Label(hint, classes="heading")
+                                yield journal_field(session, field, hint)
+                            yield Label("Rationale · Why this choice?", classes="heading")
+                            yield TextField(
+                                str(session.method_state.get("rationale", "")), multiline=True, id="journal-rationale"
+                            )
+                        with Collapsible(title="At the review date", collapsed=False, classes="form-section"):
+                            yield Static(
+                                "Fill these in later. Judge the decision by what was knowable then, not only by the "
+                                "outcome.",
+                                classes="muted",
+                            )
+                            for field, hint in review_fields:
+                                yield Label(hint, classes="heading")
+                                yield journal_field(session, field, hint)
                         yield Button("Save decision record", id="journal-save", variant="primary")
                     elif session.method_id == "issue_tree":
                         yield Static(
@@ -1344,7 +1347,7 @@ class Workspace(FieldHelpMixin, Base):
                 yield Input(placeholder="Export path: ~/decision.md or ~/decision.json", id="export-path")
             yield Static("⋮", classes="pane-handle")
             with VerticalScroll(classes="ai-pane"):
-                yield Label("AI workspace", classes="heading")
+                yield ai_pane_header("AI workspace")
                 yield Static(
                     "REMOTE → selected provider unless local. Sharing on request: method, problem, objective, assumptions and full method state; not notes/history.",
                     classes="muted",
@@ -1850,6 +1853,14 @@ class Workspace(FieldHelpMixin, Base):
             self.flush_journal()
             self.workbench.switch_screen(PlanningScreen(self.workbench.session))
         elif action == "journal-save":
+            # Read the fields directly: their change messages travel through the
+            # sections and can arrive after this button press.
+            state = self.workbench.session.method_state
+            for widget in self.query("Input, TextField"):
+                key = (widget.id or "").removeprefix("journal-")
+                if widget.id != key and widget.value != state.get(key, ""):
+                    state[key] = widget.value
+                    self.schedule_journal_save()
             self.flush_journal()
             issues = METHODS["journal"].validate(self.workbench.session.method_state)
             if issues:

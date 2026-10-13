@@ -209,6 +209,7 @@ class FMEA(StructuredMethod):
         "scale_max": 10,
         "failure_modes": [
             {
+                "item": "Checkout service",
                 "mode": "API outage",
                 "effect": "No service",
                 "cause": "Dependency",
@@ -234,6 +235,8 @@ class FMEA(StructuredMethod):
             name(row["mode"], "Failure mode")
             for field in ("effect", "cause", "controls", "action", "owner"):
                 name(row[field], field)
+            if row.get("item") is not None and not isinstance(row["item"], str):
+                raise ValueError("Item / process step must be text")
             scores = {}
             for key in ("severity", "occurrence", "detectability"):
                 value = row[key]

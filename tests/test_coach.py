@@ -10,7 +10,7 @@ from thinktui import coach
 from thinktui.ai import CodexCLI, FakeAIProvider, ProviderConfig
 from thinktui.ai_setup import AISetupDialog
 from thinktui.app import ThinkApp
-from thinktui.coach import START, CoachPanel, MemoryDialog, coach_context, split_proposals
+from thinktui.coach import START, CoachPanel, CoachStrip, MemoryDialog, coach_context, split_proposals
 from thinktui.core import Session
 from thinktui.form_screen import FormScreen
 from thinktui.safe_widgets import Static
@@ -210,6 +210,54 @@ async def test_f10_toggles_and_open_state_survives_restart(tmp_path, monkeypatch
         await pilot.press("f10")
         await settle(pilot, 2)
         assert not app.screen.query(CoachPanel)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(160, 50), (60, 30)])
+async def test_close_button_hides_coach_and_keeps_conversation(tmp_path, monkeypatch, size):
+    fake(monkeypatch)
+    store = Store(tmp_path / "t.db")
+    store.add_coach_message("user", "Kept question", None)
+    app = ThinkApp(store=store)
+    async with app.run_test(size=size) as pilot:
+        await pilot.press("f10")
+        await settle(pilot, 2)
+        close = app.screen.query_one("#coach-close", Button)
+        assert close.region.width > 0 and close.region.right <= size[0]
+        close.focus()
+        await pilot.press("enter")
+        await settle(pilot, 2)
+        assert not app.screen.query(CoachPanel)
+        assert store.setting("coach_open", "no") == "no"
+        await pilot.press("f10")
+        await settle(pilot, 2)
+        assert "Kept question" in str(app.screen.query_one(CoachPanel).query(".coach-message").first().render())
+
+
+@pytest.mark.asyncio
+async def test_closed_coach_leaves_strip_that_reopens_it_independently_of_ai_pane(tmp_path, monkeypatch):
+    fake(monkeypatch)
+    store = Store(tmp_path / "t.db")
+    session = Session(store.new_project("Example"), "matrix", "Test")
+    app = ThinkApp(store=store)
+    async with app.run_test(size=(140, 40)) as pilot:
+        app.open_session(session, guided=True)
+        await settle(pilot, 2)
+        assert not app.screen.query(CoachPanel)
+        await pilot.click(app.screen.query_one(CoachStrip))
+        await settle(pilot, 2)
+        assert app.screen.query_one(CoachPanel) and not app.screen.query(CoachStrip)
+        ai = app.screen.query_one(".ai-pane")
+        await pilot.press("f5")
+        await settle(pilot, 2)
+        assert not ai.display and app.screen.query_one(CoachPanel)
+        await pilot.click(app.screen.query_one("#coach-close", Button))
+        await settle(pilot, 2)
+        assert not app.screen.query(CoachPanel) and app.screen.query_one(CoachStrip)
+        assert not ai.display
+        await pilot.press("f5")
+        await settle(pilot, 2)
+        assert ai.display and not app.screen.query(CoachPanel)
 
 
 @pytest.mark.asyncio

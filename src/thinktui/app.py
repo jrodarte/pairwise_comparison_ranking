@@ -12,7 +12,7 @@ from textual.widgets import DataTable, Input, ListView, OptionList, Select, Text
 
 from . import methods as _methods  # noqa: F401 - register method plugins
 from .clipboard import read_clipboard, write_clipboard
-from .coach import START, Coach, CoachHost, CoachPanel
+from .coach import START, Coach, CoachHost, CoachPanel, CoachStrip
 from .core import METHODS, Session
 from .form_screen import FormScreen
 from .guided_screen import GuidedScreen
@@ -34,10 +34,11 @@ class ThinkApp(App[None]):
         Binding("q", "quit", "Quit"),
         Binding("question_mark", "help", "Help"),
         Binding("f10", "coach", "Co-planner", priority=True),
-        Binding("f3", "shrink_editor", "Narrower form"),
-        Binding("f4", "grow_editor", "Wider form"),
-        Binding("ctrl+1", "toggle_editor", "Editor pane", show=False),
-        Binding("ctrl+2", "toggle_ai", "AI pane", show=False),
+        Binding("f3", "shrink_editor", "AI pane +"),
+        Binding("f4", "grow_editor", "AI pane −"),
+        # Terminals and tmux rarely transmit Ctrl+digit (Ctrl+2 arrives as Ctrl+@), so function keys come first.
+        Binding("f5,ctrl+2,ctrl+@", "toggle_ai", "Hide/show AI"),
+        Binding("shift+f5,ctrl+1", "toggle_editor", "Editor pane", show=False),
         Binding("ctrl+0", "show_panes", "Both panes", show=False),
         Binding("j", "vim_down", "Down", show=False),
         Binding("k", "vim_up", "Up", show=False),
@@ -55,6 +56,9 @@ class ThinkApp(App[None]):
     .actions Button, .ai-actions Button { margin-right: 1; }
     .group-actions { height: auto; }
     .group-actions Button { margin-right: 1; }
+    Collapsible.form-section { padding: 0; margin: 1 0 0 0; border-top: hkey $primary 40%; }
+    Collapsible.form-section > CollapsibleTitle { color: $primary; text-style: bold; }
+    Collapsible.form-section > Contents { padding: 0 0 0 2; }
     Collapsible.form-row { padding: 0 0 0 1; margin: 0 0 1 0; }
     Collapsible.form-row > Contents { padding: 0 0 0 2; }
     .matrix-score-scroll { width: 100%; height: auto; max-height: 18; overflow-y: auto; }
@@ -87,6 +91,13 @@ class ThinkApp(App[None]):
     .pane-handle { width: 2; height: 100%; background: $primary; color: $background;
         content-align: center middle; }
     .pane-handle:hover { background: $secondary; }
+    .pane-handle.collapsed { width: 3; text-style: bold; }
+    .narrow .pane-handle.collapsed { width: 100%; height: 1; }
+    .ai-pane-header { height: auto; dock: top; background: $panel; padding-bottom: 1; }
+    .ai-pane-header .heading, .coach-header .heading { width: 1fr; margin-top: 0; }
+    Button.pane-close { width: auto; min-width: 4; height: 1; min-height: 1; border: none;
+        padding: 0 1; margin-left: 1; background: $surface; color: $primary; text-style: bold; }
+    Button.pane-close:hover, Button.pane-close:focus { background: $error; color: $background; }
     .ai-pane { width: 1fr; min-width: 18; height: 1fr; padding: 1 1;
         background: $panel; }
     .ai-pane TextArea { height: 1fr; min-height: 6; }
@@ -236,14 +247,19 @@ class ThinkApp(App[None]):
     def attach_coach(self, screen) -> None:
         """Show or hide the co-planner on a screen as it becomes active."""
         panels = list(screen.query(CoachPanel).results(CoachPanel))
-        if self.coach.open and not panels:
-            screen.mount(CoachPanel())
-        elif self.coach.open:
+        strips = list(screen.query(CoachStrip).results(CoachStrip))
+        if self.coach.open:
+            for strip in strips:
+                strip.remove()
+            if not panels:
+                screen.mount(CoachPanel())
             for panel in panels:
                 panel.refresh_view()  # A setup modal may have hidden the panel when its worker finished.
         else:
             for panel in panels:
                 panel.remove()
+            if not strips:
+                screen.mount(CoachStrip())
 
     def _layout(self) -> WorkspaceLayout | None:
         return next(self.screen.query(WorkspaceLayout).results(WorkspaceLayout), None)
@@ -284,6 +300,11 @@ class ThinkApp(App[None]):
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         if action.startswith("vim_") and isinstance(self.focused, (Input, TextArea, Select)):
             return False  # Never steal typing or selection from editors.
+        if (
+            action in {"toggle_editor", "toggle_ai", "show_panes", "shrink_editor", "grow_editor"}
+            and self._layout() is None
+        ):
+            return False  # Only analysis workspaces have panes to hide.
         return True
 
     def _vim_vertical(self, down: bool) -> None:

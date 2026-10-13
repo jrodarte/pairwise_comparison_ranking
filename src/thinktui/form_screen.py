@@ -31,6 +31,7 @@ from .form_model import (
     parse,
     rename_grid_label,
     schema_for,
+    slug,
     title,
     validate_monte_variable,
 )
@@ -41,7 +42,7 @@ from .planning_screen import PlanningScreen
 from .reports import export
 from .safe_widgets import Label, Select, Static
 from .text_field import TextField
-from .workspace_layout import WorkspaceLayout
+from .workspace_layout import WorkspaceLayout, ai_pane_header
 
 
 def _example_numbers_remain(current, example) -> bool:
@@ -94,6 +95,8 @@ class FormScreen(CoachHost, Screen):
         self.save_timer = None
         # Collapsed rows by (group path, row index); kept across recomposition.
         self.collapsed_rows: set[tuple[tuple[Any, ...], int]] = set()
+        # Collapsed top-level sections by schema key ("framing", "change_mind" or a field key).
+        self.collapsed_sections: set[str] = set()
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -102,7 +105,7 @@ class FormScreen(CoachHost, Screen):
                 yield FormContents(self)
             yield Static("⋮", classes="pane-handle")
             with VerticalScroll(classes="ai-pane"):
-                yield Static("AI draft · review before accepting", classes="heading")
+                yield ai_pane_header("AI draft · review before accepting")
                 yield Static(
                     "REMOTE → selected provider unless local. Sharing: method, problem, objective, assumptions, full method state (not notes or history). Ask only when ready.",
                     classes="muted",
@@ -128,46 +131,52 @@ class FormScreen(CoachHost, Screen):
         yield Static(
             method.description + " · Your entries are saved as you work. Examples are optional.", classes="muted"
         )
-        yield Label("Planning question", classes="heading")
-        yield Static(
-            "Define the decision or uncertainty. Why: keeps this analysis anchored.",
-            classes="muted",
-        )
-        yield TextField(
-            self.session.problem_statement,
-            placeholder="What question are you planning around?",
-            id="planning-question",
-        )
-        yield Label("Objective · decision purpose (optional)", classes="heading")
-        yield Static(
-            "What decision should this analysis inform?"
-            + (
-                " Separate from the outcomes in the hierarchy and from a node's parent."
-                if method.id in {"objectives", "hypothesis_tree", "value_focused"}
-                else ""
-            ),
-            classes="muted",
-        )
-        yield TextField(
-            self.session.objective,
-            placeholder="Decision this analysis should inform (optional)",
-            id="analysis-objective",
-        )
-        for field in schema_for(method.id):
-            yield from self.render_field(field, (field.key,))
+        schema = [field for field in schema_for(method.id) if field.kind != "generated"]
+        with Horizontal(classes="actions group-actions"):
+            yield Button("▸ Collapse all sections", id="sections-collapseall")
+            yield Button("▾ Expand all sections", id="sections-expandall")
+        with self.section("framing", "Framing · planning question and decision purpose"):
+            yield Label("Planning question", classes="heading")
+            yield Static(
+                "Define the decision or uncertainty. Why: keeps this analysis anchored.",
+                classes="muted",
+            )
+            yield TextField(
+                self.session.problem_statement,
+                placeholder="What question are you planning around?",
+                id="planning-question",
+            )
+            yield Label("Objective · decision purpose (optional)", classes="heading")
+            yield Static(
+                "What decision should this analysis inform?"
+                + (
+                    " Separate from the outcomes in the hierarchy and from a node's parent."
+                    if method.id in {"objectives", "hypothesis_tree", "value_focused"}
+                    else ""
+                ),
+                classes="muted",
+            )
+            yield TextField(
+                self.session.objective,
+                placeholder="Decision this analysis should inform (optional)",
+                id="analysis-objective",
+            )
+        for field in schema:
+            with self.section(field.key, self.section_title(field)):
+                yield from self.render_field(field, (field.key,), heading=False)
         # The overall test comes after the analysis rows: you can only say what would
         # change a conclusion once you have one.
-        yield Label("Overall: what would change your mind? (optional)", classes="heading")
-        yield Static(
-            "What observation would support or disconfirm your overall assessment? Your own test, not evidence "
-            "supplied by an example.",
-            classes="muted",
-        )
-        yield TextField(
-            str(self.draft.get("change_mind", "")),
-            placeholder="Observation that would change your assessment (optional)",
-            id="form-change-mind",
-        )
+        with self.section("change_mind", "Overall: what would change your mind? (optional)"):
+            yield Static(
+                "What observation would support or disconfirm your overall assessment? Your own test, not evidence "
+                "supplied by an example.",
+                classes="muted",
+            )
+            yield TextField(
+                str(self.draft.get("change_mind", "")),
+                placeholder="Observation that would change your assessment (optional)",
+                id="form-change-mind",
+            )
         with Horizontal(classes="actions"):
             yield Button("Save & calculate  Ctrl+S", id="form-save", variant="primary")
             yield Button("Mark finished", id="form-finish")
@@ -183,6 +192,23 @@ class FormScreen(CoachHost, Screen):
             yield Button("Explain results  F9", id="form-explain")
         yield Static("", id="form-error", classes="muted")
         yield Static("", id="form-results", classes="muted", markup=False)
+
+    def section(self, key: str, heading: str) -> Collapsible:
+        """One collapsible form section; its open/closed state survives recomposition."""
+        return Collapsible(
+            title=Content(heading),  # Content(): labels may echo user text and are never markup
+            collapsed=key in self.collapsed_sections,
+            id=f"section-{slug(key)}",
+            name=key,
+            classes="form-section",
+        )
+
+    def section_title(self, field: FormField) -> str:
+        """Section heading; list sections show their row count so filled sections are easy to spot."""
+        value = self.value_at((field.key,))
+        if field.kind == "rows" and isinstance(value, list):
+            return f"{field.label} · {len(value)}"
+        return field.label
 
     async def recompose_fields(self) -> None:
         await self.query_one(FormContents).recompose()
@@ -201,7 +227,8 @@ class FormScreen(CoachHost, Screen):
             item = item[part]
         return item
 
-    def render_field(self, field: FormField, path: tuple[Any, ...]) -> ComposeResult:
+    def render_field(self, field: FormField, path: tuple[Any, ...], heading: bool = True) -> ComposeResult:
+        """Render one field; a section's own title replaces the heading of its top-level field."""
         value = self.value_at(path)
         if field.kind == "generated":
             return
@@ -219,7 +246,8 @@ class FormScreen(CoachHost, Screen):
             group = f"group-{len(self.groups)}"
             self.groups[group] = path
             self.group_specs[group] = field
-            yield Label(field.label, classes="heading")
+            if heading:
+                yield Label(field.label, classes="heading")
             yield Static(field.help + " Why: " + field.why, classes="muted")
             rows = value if isinstance(value, list) else []
             item = field.item_label or field.label
@@ -280,7 +308,8 @@ class FormScreen(CoachHost, Screen):
                         yield Button("Remove previous judgment", id=ident)
             return
         if field.kind == "conditional_node":
-            yield Label(field.label, classes="heading")
+            if heading:
+                yield Label(field.label, classes="heading")
             yield Static(field.help + " Why: " + field.why, classes="muted")
             node = value if isinstance(value, dict) else {}
             if len(path) > 100:
@@ -291,13 +320,15 @@ class FormScreen(CoachHost, Screen):
                     yield from self.render_field(child, (*path, child.key))
             return
         if field.kind == "object":
-            yield Label(self.quadrant_label(field.key) or field.label, classes="heading")
+            if heading:
+                yield Label(self.quadrant_label(field.key) or field.label, classes="heading")
             for child in field.children:
                 yield from self.render_field(child, (*path, child.key))
             return
         ident = f"form-field-{len(self.fields)}"
         self.fields[ident] = (path, field)
-        yield Label(field.label, classes="heading")
+        if heading:
+            yield Label(field.label, classes="heading")
         yield Static(field.help + " Why: " + field.why, classes="muted")
         current = "" if value is None else ("Yes" if value else "No") if isinstance(value, bool) else str(value)
         if field.choices == ENUM_CHOICES[("forecasting", "outcome")]:
@@ -358,6 +389,8 @@ class FormScreen(CoachHost, Screen):
             if child.show_for:
                 if path == ("variables",) and isinstance(row, dict):
                     owner = row.get("distribution")
+                elif self.session.method_id == "hypothesis_tree" and isinstance(row, dict):
+                    owner = row.get("kind")  # only tests have a result
                 else:
                     parent = self.value_at(path[:-1])
                     owner = parent.get("type") if isinstance(parent, dict) else None
@@ -401,6 +434,9 @@ class FormScreen(CoachHost, Screen):
         self.remember_collapsed(event.collapsible)
 
     def remember_collapsed(self, row: Collapsible) -> None:
+        if row.has_class("form-section"):
+            (self.collapsed_sections.add if row.collapsed else self.collapsed_sections.discard)(row.name or "")
+            return
         ident = row.id or ""
         group, _, index = ident.partition("-row-")
         if group in self.groups and index.isdigit():
@@ -500,7 +536,11 @@ class FormScreen(CoachHost, Screen):
                 and path[0] == "variables"
                 and path[-1] == "distribution"
             )
-            changed_node = self.session.method_id in {"decision_tree", "fault_tree"} and path[-1] == "type"
+            changed_node = (self.session.method_id, path[-1]) in {
+                ("decision_tree", "type"),
+                ("fault_tree", "type"),
+                ("hypothesis_tree", "kind"),
+            }
             if (changed_distribution or changed_node) and self.value_at(path) != previous:
                 await self.recompose_fields()
                 self.update_monte_feedback()
@@ -618,6 +658,10 @@ class FormScreen(CoachHost, Screen):
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         ident = event.button.id or ""
+        if ident in {"sections-collapseall", "sections-expandall"}:
+            for section in self.query(Collapsible).filter(".form-section"):
+                section.collapsed = ident == "sections-collapseall"
+            return
         if ident.startswith("group-"):
             parts = ident.split("-")
             group = "-".join(parts[:2])

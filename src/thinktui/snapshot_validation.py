@@ -97,6 +97,8 @@ def _field(value: object, spec: FormField, path: str) -> None:
                 _fields(row, spec.children, f"{path}[{index}]")
     elif value == "" and type(value) is str:
         pass  # a blank editor value is a legitimate unfinished judgment
+    elif value is None and spec.optional:
+        pass  # the form saves a cleared optional choice or number as null
     elif kind in {"int", "float"}:
         n = _number(value, path)
         if kind == "int" and type(value) is not int:

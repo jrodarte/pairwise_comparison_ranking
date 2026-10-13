@@ -198,6 +198,10 @@ class Reversibility(StructuredMethod):
         }
 
 
+# Saved values for a hypothesis-tree test; blank means not yet run.
+TEST_RESULTS = ("Untested", "Supports", "Contradicts", "Inconclusive")
+
+
 class HypothesisTree(StructuredMethod):
     id = "hypothesis_tree"
     name = "Hypothesis Tree"
@@ -207,7 +211,13 @@ class HypothesisTree(StructuredMethod):
         "question": "Why did response time rise?",
         "nodes": [
             {"id": "root", "parent_id": None, "label": "Request path changed", "kind": "hypothesis"},
-            {"id": "test", "parent_id": "root", "label": "Compare traces", "kind": "test"},
+            {
+                "id": "test",
+                "parent_id": "root",
+                "label": "Compare traces",
+                "kind": "test",
+                "result": "Supports",
+            },
         ],
     }
 
@@ -216,10 +226,39 @@ class HypothesisTree(StructuredMethod):
         nodes = nodes_for(state)
         if not nodes or any(row.get("kind") not in {"hypothesis", "test"} for row in nodes):
             raise ValueError("Enter hypothesis/test nodes with a kind")
+        for row in nodes:
+            result = row.get("result") or None
+            if row["kind"] == "test" and result is not None and result not in TEST_RESULTS:
+                raise ValueError("Test result must be one of: " + ", ".join(TEST_RESULTS))
+        hierarchy = nested(state)
+        by_id = {row["id"]: row for row in nodes}
+        results = {row["id"]: row.get("result") or "Untested" for row in nodes if row["kind"] == "test"}
+
+        def tested(branches: list[dict]) -> None:
+            for branch in branches:
+                if branch["id"] in results:
+                    branch["result"] = results[branch["id"]]
+                tested(branch["children"])
+
+        tested(hierarchy)
+        # A test reports on its parent hypothesis; counts only, never a verdict.
+        # Results on a hypothesis node are kept but ignored: only tests produce them.
+        labels = [row["label"] for row in nodes]
+        review: dict[str, dict[str, int]] = {}
+        for test_id, result in results.items():
+            parent = by_id[test_id].get("parent_id")
+            if parent is not None and by_id[parent]["kind"] == "hypothesis":
+                label = by_id[parent]["label"]
+                key = label if labels.count(label) == 1 else f"{label} ({parent})"
+                counts = review.setdefault(key, dict.fromkeys(TEST_RESULTS, 0))
+                counts[result] += 1
         return {
-            "hypotheses": nested(state),
+            "hypotheses": hierarchy,
             "kinds": {row["id"]: row["kind"] for row in nodes},
-            "note": "A hypothesis is not a finding until tested.",
+            "test_results": review,
+            "untested": [by_id[test_id]["label"] for test_id, result in results.items() if result == "Untested"],
+            "note": "A hypothesis is not a finding until tested; one contradicting test is a reason to look again, "
+            "not proof.",
         }
 
 

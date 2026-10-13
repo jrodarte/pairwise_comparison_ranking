@@ -93,6 +93,22 @@ def test_settings_validation_and_legacy_fallback(tmp_path):
     assert config_for(store, "ollama") == ProviderConfig("ollama", "http://gpu-box:11434", "llama3")
     assert config_for(store, "openrouter").model == "anthropic/claude-sonnet-4"
     assert config_for(store, "anthropic").base_url == "https://api.anthropic.com/v1"
+    store.set_setting("ai.claude_code.effort", "high")
+    assert config_for(store, "claude_code").effort == "high"
+    store.set_setting("ai.openrouter.effort", "medium")
+    store.set_setting("ai.custom.effort", "low")
+    assert config_for(store, "openrouter").effort == "medium"
+    assert config_for(store, "custom").effort == "low"
+    store.set_setting("ai.gemini.model", "gemini-2.0-flash")
+    with pytest.raises(ValueError, match="provider model"):
+        store.set_setting("ai.gemini.effort", "high")
+    store.set_settings({"ai.gemini.model": "gemini-3-flash", "ai.gemini.effort": "low"})
+    with pytest.raises(ValueError, match="provider model"):
+        store.set_setting("ai.gemini.model", "gemini-2.0-flash")
+    assert config_for(store, "gemini").effort == "low"
+    for key, value in [("ai.claude_code.effort", "arbitrary"), ("ai.cursor.effort", "high")]:
+        with pytest.raises(ValueError, match="thinking level"):
+            store.set_setting(key, value)
     store.close()
 
 
@@ -144,11 +160,135 @@ async def test_openai_compatible_and_anthropic_requests(isolated_ai, monkeypatch
     assert "sk-" not in str(excinfo.value)
 
 
+@pytest.mark.asyncio
+async def test_thinking_effort_request_mapping_and_defaults(monkeypatch):
+    calls = fake_endpoint(
+        monkeypatch,
+        {
+            "/api/tags": OLLAMA_TAGS,
+            "/api/chat": {"message": {"content": "OK"}},
+            "/chat/completions": {"choices": [{"message": {"content": "OK"}}]},
+            "/messages": {"content": [{"type": "text", "text": "OK"}]},
+        },
+        {
+            "/api/chat": ['{"message":{"content":"OK"}}'],
+            "/chat/completions": ['data: {"choices":[{"delta":{"content":"OK"}}]}'],
+            "/messages": ['data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"OK"}}'],
+        },
+    )
+    request = AIRequest("q", {})
+    cases = [
+        (ProviderConfig("ollama", "http://localhost:11434", "qwen3:8b", "low"), None, "think", "low"),
+        (ProviderConfig("openai", "https://api.openai.com/v1", "o3", "medium"), "key", "reasoning_effort", "medium"),
+        (
+            ProviderConfig("openrouter", "https://openrouter.ai/api/v1", "anthropic/claude-sonnet-4", "high"),
+            "key",
+            "reasoning",
+            {"effort": "high"},
+        ),
+        (
+            ProviderConfig("groq", "https://api.groq.com/openai/v1", "openai/gpt-oss-120b", "low"),
+            "key",
+            "reasoning_effort",
+            "low",
+        ),
+        (
+            ProviderConfig("custom", "https://example.com/v1", "reasoning-model", "medium"),
+            None,
+            "reasoning_effort",
+            "medium",
+        ),
+        (
+            ProviderConfig("lmstudio", "http://localhost:1234/v1", "reasoning-model", "high"),
+            None,
+            "reasoning_effort",
+            "high",
+        ),
+        (
+            ProviderConfig("gemini", "https://example.com/v1", "gemini-2.5-flash", "medium"),
+            "key",
+            "extra_body",
+            {"google": {"thinking_config": {"thinking_budget": 8192}}},
+        ),
+        (
+            ProviderConfig("gemini", "https://example.com/v1", "gemini-3-flash", "low"),
+            "key",
+            "extra_body",
+            {"google": {"thinking_config": {"thinking_level": "low"}}},
+        ),
+        (
+            ProviderConfig("mistral", "https://example.com/v1", "mistral-small-latest", "high"),
+            "key",
+            "reasoning_effort",
+            "high",
+        ),
+        (
+            ProviderConfig("deepseek", "https://example.com/v1", "deepseek-flash", "high"),
+            "key",
+            "reasoning_effort",
+            "high",
+        ),
+        (ProviderConfig("xai", "https://example.com/v1", "grok-4.7", "medium"), "key", "reasoning_effort", "medium"),
+        (
+            ProviderConfig("together", "https://example.com/v1", "openai/gpt-oss-120b", "low"),
+            "key",
+            "reasoning_effort",
+            "low",
+        ),
+        (
+            ProviderConfig("anthropic", "https://api.anthropic.com/v1", "claude-sonnet-5-5", "high"),
+            "key",
+            "output_config",
+            {"effort": "high"},
+        ),
+    ]
+    for config, key, field, value in cases:
+        provider = create(config, key)
+        assert await provider.complete(request) == "OK"
+        assert calls[-1]["payload"][field] == value
+        if config.preset_id == "anthropic":
+            assert calls[-1]["payload"]["thinking"] == {"type": "adaptive"}
+        if config.preset_id == "deepseek":
+            assert calls[-1]["payload"]["thinking"] == {"type": "enabled"}
+        assert [chunk async for chunk in provider.stream(request)] == ["OK"]
+        assert calls[-1]["payload"][field] == value
+        default = create(ProviderConfig(config.preset_id, config.base_url, config.model), key)
+        await default.complete(request)
+        assert field not in calls[-1]["payload"]
+        assert "thinking" not in calls[-1]["payload"]
+        assert "reasoning_effort" not in calls[-1]["payload"]
+        assert "reasoning" not in calls[-1]["payload"]
+    assert "cursor" not in ai.EFFORT_PROVIDERS
+    with pytest.raises(ValueError, match="Unsupported thinking"):
+        create(ProviderConfig("cursor", "", "auto", "high"))
+    for preset_id, model in (
+        ("openai", "gpt-4.1-mini"),
+        ("groq", "qwen/qwen3-32b"),
+        ("gemini", "gemini-2.0-flash"),
+        ("deepseek", "deepseek-chat"),
+        ("together", "meta/llama-3"),
+    ):
+        with pytest.raises(ValueError, match="Unsupported thinking"):
+            create(ProviderConfig(preset_id, "https://example.com/v1", model, "high"), "key")
+
+
+def test_subscription_thinking_flags(tmp_path):
+    claude = ClaudeCodeCLI("sonnet", fake_cli(tmp_path, "claude", "exit 0"), effort="high")
+    assert claude.command()[-2:] == ["--effort", "high"]
+    assert claude.command(stream=True)[-2:] == ["--effort", "high"]
+    assert "--effort" not in ClaudeCodeCLI("sonnet", claude.binary).command()
+    codex = CodexCLI("gpt-5", fake_cli(tmp_path, "codex", "exit 0"), effort="low")
+    assert codex.command()[-3:] == ["-c", 'model_reasoning_effort="low"', "-"]
+    assert "-c" not in CodexCLI("gpt-5", codex.binary).command()
+
+
 def test_http_errors_never_echo_secrets(monkeypatch):
     def refuse(req, timeout):
         raise error.HTTPError(req.full_url, 401, "Unauthorized", {}, io.BytesIO(b"bad key sk-123"))
 
-    monkeypatch.setattr(ai.request, "urlopen", refuse)
+    monkeypatch.setattr(
+        ai, "_open", lambda url, payload, headers, timeout: refuse(ai._http(url, payload, headers), timeout)
+    )
     with pytest.raises(RuntimeError) as excinfo:
         REAL_REQUEST("https://api.example.com/v1/x?key=sk-123", {}, {"Authorization": "Bearer sk-123"})
     assert "HTTP 401" in str(excinfo.value) and "API key" in str(excinfo.value)
@@ -188,7 +328,7 @@ async def test_claude_subscription_cli(tmp_path, monkeypatch):
     answer = await provider.complete(AIRequest("challenge", {"problem": "migrate"}))
     assert answer == "Question the vendor timeline"
     recorded = log.read_text()
-    assert "-p|--output-format|json|" in recorded and "--tools||" in recorded and "--model|opus|" in recorded
+    assert "-p|--output-format|json|" in recorded and "--tools||" in recorded and "--model=opus|" in recorded
     assert "key=\n" in recorded  # API key stripped so the subscription login is used
     assert '"problem": "migrate"' in recorded  # context sent on stdin, not argv
     failing = ClaudeCodeCLI("", fake_claude(tmp_path, 'echo \'{"is_error":true,"result":"Not logged in"}\'; exit 1'))
@@ -231,6 +371,78 @@ async def test_settings_screen_saves_provider_and_key_outside_database(tmp_path,
     assert isolated_ai.secrets[("thinktui", "openrouter")] == "sk-or-secret"
     store.close()
     assert b"sk-or-secret" not in (tmp_path / "settings.db").read_bytes()
+
+
+@pytest.mark.asyncio
+async def test_settings_keep_each_services_model_and_effort(tmp_path):
+    store = Store(tmp_path / "effort.db")
+    app = ThinkApp(store=store, initial="settings")
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, Settings)
+        screen.query_one("#provider", Select).value = "claude_code"
+        await pilot.pause()
+        screen.query_one("#model", Input).value = "opus"
+        screen.query_one("#effort", Select).value = "high"
+        screen.query_one("#provider", Select).value = "chatgpt"
+        await pilot.pause()
+        screen.query_one("#model", Input).value = "gpt-5"
+        screen.query_one("#effort", Select).value = "low"
+        screen.query_one("#provider", Select).value = "openrouter"
+        await pilot.pause()
+        assert screen.query_one("#effort-box").display
+        screen.query_one("#model", Input).value = "anthropic/claude-sonnet-4"
+        screen.query_one("#effort", Select).value = "medium"
+        screen.query_one("#provider", Select).value = "gemini"
+        await pilot.pause()
+        assert screen.query_one("#effort-box").display
+        screen.query_one("#model", Input).value = "gemini-3-flash"
+        await pilot.pause()
+        screen.query_one("#effort", Select).value = "high"
+        screen.query_one("#model", Input).value = "gemini-2.0-flash"
+        await pilot.pause()
+        assert screen.query_one("#effort", Select).disabled
+        assert screen.query_one("#effort", Select).value == ""
+        assert screen.query_one("#effort-unavailable").display
+        screen.query_one("#model", Input).value = "gemini-3-flash"
+        await pilot.pause()
+        screen.query_one("#effort", Select).value = "high"
+        screen.query_one("#provider", Select).value = "cursor"
+        await pilot.pause()
+        assert not screen.query_one("#effort-box").display
+        assert screen.query_one("#effort-unavailable").display
+        screen.query_one("#provider", Select).value = "openrouter"
+        await pilot.pause()
+        assert screen.query_one("#effort", Select).value == "medium"
+        screen.query_one("#provider", Select).value = "claude_code"
+        await pilot.pause()
+        assert screen.query_one("#model", Input).value == "opus"
+        assert screen.query_one("#effort", Select).value == "high"
+        screen.action_save()
+        await pilot.pause()
+    assert config_for(store, "claude_code").effort == "high"
+    assert config_for(store, "chatgpt") == ProviderConfig("chatgpt", "", "gpt-5", "low")
+    assert config_for(store, "gemini").effort == "high"
+    assert config_for(store, "gemini").model == "gemini-3-flash"
+    assert config_for(store, "openrouter") == ProviderConfig(
+        "openrouter", "https://openrouter.ai/api/v1", "anthropic/claude-sonnet-4", "medium"
+    )
+    store.close()
+    reopened = Store(tmp_path / "effort.db")
+    app = ThinkApp(store=reopened, initial="settings")
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app.screen.query_one("#effort", Select).value == "high"
+        app.screen.query_one("#provider", Select).value = "openrouter"
+        await pilot.pause()
+        assert app.screen.query_one("#effort", Select).value == "medium"
+        assert app.screen.query_one("#model", Input).value == "anthropic/claude-sonnet-4"
+        app.screen.query_one("#provider", Select).value = "gemini"
+        await pilot.pause()
+        assert app.screen.query_one("#effort", Select).value == "high"
+        assert app.screen.query_one("#model", Input).value == "gemini-3-flash"
+    reopened.close()
 
 
 @pytest.mark.asyncio
@@ -418,7 +630,7 @@ async def test_chatgpt_subscription_via_codex(tmp_path, monkeypatch):
     assert await provider.complete(AIRequest("challenge", {"problem": "pricing"})) == "Test the churn assumption."
     recorded = log.read_text()
     assert recorded.startswith("exec|--json|--skip-git-repo-check|--ephemeral|--sandbox|read-only|")
-    assert "--model|gpt-b|-|" in recorded and "key=\n" in recorded and '"problem": "pricing"' in recorded
+    assert "--model=gpt-b|-|" in recorded and "key=\n" in recorded and '"problem": "pricing"' in recorded
     assert await provider.models() == ["gpt-a", "gpt-b"]
     assert await provider.health_check() == "Logged in using ChatGPT"
     assert provider.login_command() == [binary, "login"]

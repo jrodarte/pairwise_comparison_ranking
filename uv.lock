@@ -415,8 +415,8 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "keyring", specifier = ">=25" },
-    { name = "platformdirs", specifier = ">=4.0" },
+    { name = "keyring", specifier = ">=25,<27" },
+    { name = "platformdirs", specifier = ">=4.0,<6" },
     { name = "textual", specifier = ">=1.0,<7" },
 ]
 

@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "ThinkTUI: Structured Thinking & Decision Toolkit"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = ["textual>=1.0,<7", "platformdirs>=4.0", "keyring>=25"]
+dependencies = ["textual>=1.0,<7", "platformdirs>=4.0,<6", "keyring>=25,<27"]
 
 [project.scripts]
 pairrank = "pairwise_prioritizer.__main__:main"
@@ -19,6 +19,9 @@ dev = ["pytest>=8", "pytest-asyncio>=1.0", "ruff>=0.9"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/pairwise_prioritizer", "src/thinktui"]
+
+[tool.hatch.build.targets.sdist]
+include = ["/pyproject.toml", "/README.md", "/LICENSE", "/src/**", "/docs/**", "/tests/**"]
 
 [tool.ruff]
 line-length = 120

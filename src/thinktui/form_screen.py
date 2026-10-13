@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
@@ -10,12 +11,16 @@ from typing import Any
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.content import Content
 from textual.screen import Screen
-from textual.widgets import Button, Footer, Header, Input, Label, Select, Static, TextArea
+from textual.widgets import Button, Collapsible, Footer, Header, Input, TextArea
 
 from .ai import connect, public_error, selected_provider, visible_text
+from .ai_setup import AISetupRequired, prompt_ai_setup, prompt_missing_key
+from .coach import CoachHost
 from .core import METHODS, Session, timestamp
-from .field_ai import stream_text_draft
+from .explain import ExplainDialog
+from .field_ai import can_draft_path, stream_text_draft
 from .form_model import (
     ENUM_CHOICES,
     FormField,
@@ -29,11 +34,30 @@ from .form_model import (
     title,
     validate_monte_variable,
 )
+from .guided_workflow import QUADRANTS
+from .path_picker import ExportPicker, suggested_filename, user_path
+from .planning import planned_next
+from .planning_screen import PlanningScreen
 from .reports import export
+from .safe_widgets import Label, Select, Static
+from .text_field import TextField
+from .workspace_layout import WorkspaceLayout
+
+
+def _example_numbers_remain(current, example) -> bool:
+    """Illustrative numbers cannot silently become user judgments after a label edit."""
+    if isinstance(example, dict) and isinstance(current, dict):
+        return any(_example_numbers_remain(current.get(key), value) for key, value in example.items())
+    if isinstance(example, list) and isinstance(current, list):
+        return any(_example_numbers_remain(item, value) for item, value in zip(current, example, strict=False))
+    return type(example) in (int, float) and current == example
 
 
 class FormContents(Vertical):
     """Recompose changing fields without tearing down the Header or Footer."""
+
+    # Vertical defaults to height: 1fr with hidden overflow, which clips long forms inside the scroll pane.
+    DEFAULT_CSS = "FormContents { height: auto; }"
 
     def __init__(self, owner: FormScreen) -> None:
         super().__init__(classes="form-contents", id="form-contents")
@@ -43,11 +67,12 @@ class FormContents(Vertical):
         yield from self.owner.compose_fields()
 
 
-class FormScreen(Screen):
+class FormScreen(CoachHost, Screen):
     BINDINGS = [
         ("f6", "advanced", "Advanced JSON"),
         ("ctrl+s", "save", "Save"),
         ("ctrl+e", "export", "Export"),
+        ("f9", "explain", "Explain results"),
         ("escape", "project", "Project"),
         Binding("ctrl+g", "stop_ai", "Stop AI", priority=True),
     ]
@@ -67,12 +92,15 @@ class FormScreen(Screen):
         self.ai_ready = False
         self.invalid_fields: set[tuple[Any, ...]] = set()
         self.save_timer = None
+        # Collapsed rows by (group path, row index); kept across recomposition.
+        self.collapsed_rows: set[tuple[tuple[Any, ...], int]] = set()
 
     def compose(self) -> ComposeResult:
         yield Header()
-        with Horizontal(classes="workspace-layout"):
+        with WorkspaceLayout():
             with VerticalScroll(classes="editor-pane"):
                 yield FormContents(self)
+            yield Static("⋮", classes="pane-handle")
             with VerticalScroll(classes="ai-pane"):
                 yield Static("AI draft · review before accepting", classes="heading")
                 yield Static(
@@ -100,25 +128,59 @@ class FormScreen(Screen):
         yield Static(
             method.description + " · Your entries are saved as you work. Examples are optional.", classes="muted"
         )
-        yield Input(
-            value=self.session.problem_statement,
+        yield Label("Planning question", classes="heading")
+        yield Static(
+            "Define the decision or uncertainty. Why: keeps this analysis anchored.",
+            classes="muted",
+        )
+        yield TextField(
+            self.session.problem_statement,
             placeholder="What question are you planning around?",
             id="planning-question",
         )
+        yield Label("Objective · decision purpose (optional)", classes="heading")
         yield Static(
-            "Planning question · Define the decision or uncertainty. Why: keeps this analysis anchored.",
+            "What decision should this analysis inform?"
+            + (
+                " Separate from the outcomes in the hierarchy and from a node's parent."
+                if method.id in {"objectives", "hypothesis_tree", "value_focused"}
+                else ""
+            ),
             classes="muted",
+        )
+        yield TextField(
+            self.session.objective,
+            placeholder="Decision this analysis should inform (optional)",
+            id="analysis-objective",
         )
         for field in schema_for(method.id):
             yield from self.render_field(field, (field.key,))
+        # The overall test comes after the analysis rows: you can only say what would
+        # change a conclusion once you have one.
+        yield Label("Overall: what would change your mind? (optional)", classes="heading")
+        yield Static(
+            "What observation would support or disconfirm your overall assessment? Your own test, not evidence "
+            "supplied by an example.",
+            classes="muted",
+        )
+        yield TextField(
+            str(self.draft.get("change_mind", "")),
+            placeholder="Observation that would change your assessment (optional)",
+            id="form-change-mind",
+        )
         with Horizontal(classes="actions"):
             yield Button("Save & calculate  Ctrl+S", id="form-save", variant="primary")
             yield Button("Mark finished", id="form-finish")
+            if planned_next(self.session):
+                yield Button("Continue planned workflow", id="form-plan")
             yield Button("Load example", id="load-example")
             yield Button("Advanced JSON  F6", id="advanced")
             yield Button("Project", id="project")
         yield Input(placeholder="Export path: ~/decision.md or ~/decision.json", id="form-export-path")
-        yield Button("Export  Ctrl+E", id="form-export")
+        with Horizontal(classes="actions"):
+            yield Button("Export  Ctrl+E", id="form-export")
+            yield Button("Choose location…", id="form-export-browse")
+            yield Button("Explain results  F9", id="form-explain")
         yield Static("", id="form-error", classes="muted")
         yield Static("", id="form-results", classes="muted", markup=False)
 
@@ -160,53 +222,27 @@ class FormScreen(Screen):
             yield Label(field.label, classes="heading")
             yield Static(field.help + " Why: " + field.why, classes="muted")
             rows = value if isinstance(value, list) else []
+            item = field.item_label or field.label
             if not rows:
-                yield Static("No entries yet. Choose Add row to begin.", classes="muted")
+                yield Static(f"No entries yet. Choose + Add {item.lower()} to begin.", classes="muted")
+            if len(rows) > 1:
+                with Horizontal(classes="actions group-actions"):
+                    yield Button("▸ Collapse all", id=f"{group}-collapseall")
+                    yield Button("▾ Expand all", id=f"{group}-expandall")
             for index, row in enumerate(rows):
-                label = str(row.get("name", row.get("label", ""))) if isinstance(row, dict) else str(row)
-                yield Label(f"{field.label} {index + 1}" + (f" · {label}" if label else ""), classes="heading")
-                for child in field.children:
-                    if child.show_for:
-                        if path == ("variables",) and isinstance(row, dict):
-                            owner = row.get("distribution")
-                        else:
-                            parent = self.value_at(path[:-1])
-                            owner = parent.get("type") if isinstance(parent, dict) else None
-                        if owner not in child.show_for:
-                            continue
-                    if child.key == "value" and child.kind == "conditional_node":
-                        child_path = (*path, index)
-                    elif isinstance(row, (int, float, str)) and child.key == "value":
-                        child_path = (*path, index)
-                        if self.session.method_id == "sensitivity" and path[-1] == "scores":
-                            child = replace(child, label=self.grid_heading(path, path[-2], index))
-                    elif isinstance(row, list) and child.key == "value":
-                        for j in range(len(row)):
-                            heading = self.grid_heading(path, index, j)
-                            yield from self.render_field(
-                                FormField(
-                                    "score",
-                                    heading,
-                                    kind="float",
-                                    minimum=0,
-                                    maximum=10,
-                                    help="Enter your score, 0–10.",
-                                    why="Scores determine the ranking.",
-                                ),
-                                (*path, index, j),
-                            )
-                        continue
-                    else:
-                        child_path = (*path, index, child.key)
-                    yield from self.render_field(child, child_path)
-                if self.session.method_id == "monte_carlo" and path == ("variables",):
-                    yield Static("", id=f"monte-error-{index}", classes="muted")
-                with Horizontal(classes="actions"):
-                    for action, text in (("up", "↑ Move up"), ("down", "↓ Move down"), ("remove", "Remove")):
-                        yield Button(text, id=f"{group}-{action}-{index}")
+                with Collapsible(
+                    title=Content(self.row_title(item, index, row)),  # Content(): user text is never markup
+                    collapsed=(path, index) in self.collapsed_rows,
+                    id=f"{group}-row-{index}",
+                    classes="form-row",
+                ):
+                    yield from self.render_row(field, path, index, row, group)
             with Horizontal(classes="group-actions"):
-                yield Button(f"Add {field.label.lower()} row", id=f"{group}-add")
-                if any(child.kind in {"text", "long_text"} for child in field.children):
+                yield Button(f"+ Add {item.lower()}", id=f"{group}-add")
+                if can_draft_path(self.session.method_id, path) and any(
+                    child.kind in {"text", "long_text"} and can_draft_path(self.session.method_id, (*path, child.key))
+                    for child in field.children
+                ):
                     yield Button(
                         "Suggest rows",
                         id=f"suggest-rows-{group}",
@@ -255,7 +291,7 @@ class FormScreen(Screen):
                     yield from self.render_field(child, (*path, child.key))
             return
         if field.kind == "object":
-            yield Label(field.label, classes="heading")
+            yield Label(self.quadrant_label(field.key) or field.label, classes="heading")
             for child in field.children:
                 yield from self.render_field(child, (*path, child.key))
             return
@@ -289,16 +325,117 @@ class FormScreen(Screen):
             yield Select(options, value=current, allow_blank=False, id=ident)
         elif field.kind in {"text", "long_text"}:
             with Horizontal(classes="field-editor"):
-                if field.multiline:
-                    yield TextArea(current, id=ident)
-                else:
-                    yield Input(value=current, placeholder=field.help, id=ident)
-                yield Button("Draft text", id=f"suggest-{ident}", classes="ai-trigger")
+                yield TextField(
+                    current,
+                    placeholder=field.help,
+                    multiline=field.multiline,
+                    size_key=self.size_key(path),
+                    id=ident,
+                )
+                if can_draft_path(self.session.method_id, path):
+                    yield Button("Draft text", id=f"suggest-{ident}", classes="ai-trigger")
         elif field.multiline:
-            yield TextArea(current, id=ident)
+            yield TextField(current, multiline=True, size_key=self.size_key(path), id=ident)
         else:
             yield Input(value=current, placeholder=field.help, id=ident)
         yield Static("", id=f"error-{ident}", classes="muted")
+
+    @staticmethod
+    def row_title(item: str, index: int, row: Any) -> str:
+        """Row heading; the row's own name or statement identifies it when collapsed."""
+        if isinstance(row, dict):
+            keys = ("name", "label", "statement", "title", "claim", "mode", "question")
+            label = next((str(row[key]) for key in keys if row.get(key) not in (None, "")), "")
+        else:
+            label = "" if isinstance(row, list) else str(row)
+        label = " ".join(label.split())
+        if len(label) > 70:
+            label = label[:69] + "…"
+        return f"{item} {index + 1}" + (f" · {label}" if label else "")
+
+    def render_row(self, field: FormField, path: tuple[Any, ...], index: int, row: Any, group: str) -> ComposeResult:
+        for child in field.children:
+            if child.show_for:
+                if path == ("variables",) and isinstance(row, dict):
+                    owner = row.get("distribution")
+                else:
+                    parent = self.value_at(path[:-1])
+                    owner = parent.get("type") if isinstance(parent, dict) else None
+                if owner not in child.show_for:
+                    continue
+            if child.key == "value" and child.kind == "conditional_node":
+                child_path = (*path, index)
+            elif isinstance(row, (int, float, str)) and child.key == "value":
+                child_path = (*path, index)
+                if self.session.method_id == "sensitivity" and path[-1] == "scores":
+                    child = replace(child, label=self.grid_heading(path, path[-2], index))
+            elif isinstance(row, list) and child.key == "value":
+                for j in range(len(row)):
+                    heading = self.grid_heading(path, index, j)
+                    yield from self.render_field(
+                        FormField(
+                            "score",
+                            heading,
+                            kind="float",
+                            minimum=0,
+                            maximum=10,
+                            help="Enter your score, 0–10.",
+                            why="Scores determine the ranking.",
+                        ),
+                        (*path, index, j),
+                    )
+                continue
+            else:
+                child_path = (*path, index, child.key)
+            yield from self.render_field(child, child_path)
+        if self.session.method_id == "monte_carlo" and path == ("variables",):
+            yield Static("", id=f"monte-error-{index}", classes="muted")
+        with Horizontal(classes="actions"):
+            for action, text in (("up", "↑ Move up"), ("down", "↓ Move down"), ("remove", "Remove")):
+                yield Button(text, id=f"{group}-{action}-{index}")
+
+    def on_collapsible_collapsed(self, event: Collapsible.Collapsed) -> None:
+        self.remember_collapsed(event.collapsible)
+
+    def on_collapsible_expanded(self, event: Collapsible.Expanded) -> None:
+        self.remember_collapsed(event.collapsible)
+
+    def remember_collapsed(self, row: Collapsible) -> None:
+        ident = row.id or ""
+        group, _, index = ident.partition("-row-")
+        if group in self.groups and index.isdigit():
+            key = (self.groups[group], int(index))
+            if row.collapsed:
+                self.collapsed_rows.add(key)
+            else:
+                self.collapsed_rows.discard(key)
+
+    def set_rows_collapsed(self, group: str, collapsed: bool) -> None:
+        for row in self.query(Collapsible).filter(".form-row"):
+            if (row.id or "").startswith(f"{group}-row-"):
+                row.collapsed = collapsed
+
+    def move_collapsed(self, path: tuple[Any, ...], moves: dict[int, int], drop: int | None = None) -> None:
+        """Keep each row's collapsed state with the row when rows move or one is removed."""
+        mine = {index for owner, index in self.collapsed_rows if owner == path}
+        self.collapsed_rows -= {(path, index) for index in mine}
+        self.collapsed_rows |= {(path, moves.get(index, index)) for index in mine if index != drop}
+
+    def size_key(self, path: tuple[Any, ...]) -> str:
+        return f"{self.session.id}:{'.'.join(map(str, path))}"
+
+    def quadrant_label(self, key: str) -> str:
+        """Name a scenario quadrant by the user's own axis poles once they exist."""
+        if self.session.method_id != "scenarios" or key not in QUADRANTS:
+            return ""
+        axes = self.draft.get("axes", [])
+        if not isinstance(axes, list) or len(axes) < 2 or not all(isinstance(axis, dict) for axis in axes[:2]):
+            return ""
+        poles = []
+        for axis, side in zip(axes[:2], key.split("_"), strict=True):
+            pole = str(axis.get(side) or "").strip()
+            poles.append(pole or f"{str(axis.get('name') or 'axis').strip()} {side}")
+        return "Scenario · " + " × ".join(poles)
 
     def row_id(self, path: tuple[Any, ...]) -> str | None:
         if len(path) >= 3 and isinstance(path[-2], int):
@@ -332,6 +469,18 @@ class FormScreen(Screen):
         if event.input.id == "planning-question":
             if event.value != self.session.problem_statement:
                 self.session.problem_statement = event.value
+                self.schedule_save()
+        elif event.input.id == "analysis-objective":
+            if event.value != self.session.objective:
+                self.session.objective = event.value
+                self.schedule_save()
+        elif event.input.id == "form-change-mind":
+            if event.value != self.draft.get("change_mind", ""):
+                if event.value:
+                    self.draft["change_mind"] = event.value
+                else:
+                    self.draft.pop("change_mind", None)
+                self.session.method_state = deepcopy(self.draft)
                 self.schedule_save()
         elif event.input.id in self.fields:
             self.change(event.input.id, event.value)
@@ -406,11 +555,27 @@ class FormScreen(Screen):
         else:
             self.save_timer.reset()
 
+    def _save_draft(self, description: str) -> bool:
+        try:
+            self.app.store.save(self.session, description)
+        except (sqlite3.Error, ValueError):
+            self.notify(
+                "Could not save; database is busy or changed elsewhere. Your draft remains in this editor.",
+                severity="error",
+            )
+            return False
+        return True
+
     def flush_save(self) -> None:
         if self.save_timer is not None:
             self.save_timer.stop()
             self.save_timer = None
-        self.app.store.save(self.session, "Edited worksheet")
+        try:
+            self.app.store.save(self.session, "Edited worksheet")
+        except (sqlite3.Error, ValueError) as exc:
+            self.notify(
+                f"Could not save: {exc}. Keep this screen open until database access is restored.", severity="error"
+            )
 
     def on_unmount(self) -> None:
         if self.save_timer is not None:
@@ -431,7 +596,7 @@ class FormScreen(Screen):
             return
         try:
             result = method.calculate(self.draft)
-        except (ValueError, KeyError, TypeError, IndexError, ZeroDivisionError):
+        except Exception:
             self.query_one("#form-results", Static).update("Add the required details to see a local preview.")
             return
         if self.session.method_id in {"assumptions", "premortem"}:
@@ -444,7 +609,7 @@ class FormScreen(Screen):
         self.query_one("#form-results", Static).update("Local result preview · your inputs:\n" + summary)
 
     def on_resize(self) -> None:
-        self.query_one(".workspace-layout").set_class(self.size.width < 100, "narrow")
+        self.query_one(WorkspaceLayout).update_split(self.size.width < 100)
 
     def on_mount(self) -> None:
         self.on_resize()
@@ -459,6 +624,9 @@ class FormScreen(Screen):
             action = parts[2]
             index = int(parts[3]) if len(parts) > 3 else None
             path = self.groups[group]
+            if action in {"collapseall", "expandall"}:
+                self.set_rows_collapsed(group, action == "collapseall")
+                return
             spec = self.group_specs[group]
             rows = self.value_at(path)
             rows = list(rows) if isinstance(rows, list) else []
@@ -484,10 +652,12 @@ class FormScreen(Screen):
                 rows.append(row)
             elif action == "remove":
                 rows.pop(index)
+                self.move_collapsed(path, {i: i - 1 for i in range(index + 1, len(rows) + 1)}, drop=index)
             elif action in {"up", "down"}:
                 other = index + (-1 if action == "up" else 1)
                 if 0 <= other < len(rows):
                     rows[index], rows[other] = rows[other], rows[index]
+                    self.move_collapsed(path, {index: other, other: index})
             self.put(path, rows)
             if self.session.method_id == "sensitivity" and path == ("criteria",):
                 for alternative in self.draft.get("alternatives", []):
@@ -501,7 +671,8 @@ class FormScreen(Screen):
             self.pending_labels.clear()  # row indices changed; never reuse a stale rename target
             normalize_ids(self.draft)
             self.session.method_state = deepcopy(self.draft)
-            self.app.store.save(self.session, f"Changed {title(str(path[-1]))} rows")
+            if not self._save_draft(f"Changed {title(str(path[-1]))} rows"):
+                return
             await self.recompose_fields()
             self.preview_result()
             self.update_monte_feedback()
@@ -513,13 +684,14 @@ class FormScreen(Screen):
             if isinstance(values, dict):
                 del values[path[-1]]  # explicit user action; never discard a judgment during a rename
                 self.session.method_state = deepcopy(self.draft)
-                self.app.store.save(self.session, "Removed prior keyed judgment by request")
+                if not self._save_draft("Removed prior keyed judgment by request"):
+                    return
                 await self.recompose_fields()
         elif ident in {"form-save", "form-finish"}:
             self.action_save()
         elif ident == "load-example":
             if any(
-                value
+                value is not None and value != "" and value != [] and value != {}
                 for key, value in self.draft.items()
                 if key not in {"change_mind", "_guided_step"} and not key.startswith("workflow_")
             ):
@@ -528,15 +700,22 @@ class FormScreen(Screen):
                     severity="warning",
                 )
                 return
-            self.draft = {**self.draft, **draft_from_example(self.session.method_id)}
+            self.draft = {**self.draft, **draft_from_example(self.session.method_id), "_example_loaded": True}
             self.session.method_state = deepcopy(self.draft)
-            self.app.store.save(self.session, "Loaded illustrative example by request")
+            if not self._save_draft("Loaded illustrative example by request"):
+                return
             await self.recompose_fields()
             self.preview_result()
+        elif ident == "form-plan":
+            self.app.switch_screen(PlanningScreen(self.session))
         elif ident == "advanced":
             self.action_advanced()
         elif ident == "form-export":
             self.action_export()
+        elif ident == "form-export-browse":
+            self.browse_export("#form-export-path")
+        elif ident == "form-explain":
+            self.action_explain()
         elif ident == "project":
             self.action_project()
         elif ident.startswith("suggest-rows-"):
@@ -568,6 +747,10 @@ class FormScreen(Screen):
         return result
 
     def action_save(self) -> None:
+        # Ctrl+S saves the draft, including common analysis fields, even when
+        # method rows are incomplete and cannot yet produce a result.
+        if self.save_timer is not None:
+            self.flush_save()
         if self.session.method_id == "monte_carlo":
             for index, row in enumerate(self.draft.get("variables", []), 1):
                 if issue := validate_monte_variable(row):
@@ -576,29 +759,58 @@ class FormScreen(Screen):
         if self.invalid_fields:
             self.query_one("#form-error", Static).update("Correct the highlighted entries before saving.")
             return
+        user_inputs = {
+            key: value
+            for key, value in self.draft.items()
+            if key != "change_mind" and not key.startswith(("workflow_", "_"))
+        }
+        if user_inputs == draft_from_example(self.session.method_id) or (
+            self.draft.get("_example_loaded")
+            and _example_numbers_remain(self.draft, draft_from_example(self.session.method_id))
+        ):
+            self.query_one("#form-error", Static).update(
+                "Replace every illustrative numeric judgment with your own inputs before marking this complete."
+            )
+            return
+        candidate = deepcopy(self.draft)
         if (
             self.session.method_id == "bottleneck"
-            and isinstance(self.draft.get("proposal"), dict)
-            and not any(self.draft["proposal"].values())
+            and isinstance(candidate.get("proposal"), dict)
+            and all(value is None or value == "" for value in candidate["proposal"].values())
         ):
-            self.draft.pop("proposal")
+            candidate.pop("proposal")
         if (
             self.session.method_id == "constraints"
-            and isinstance(self.draft.get("throughput"), dict)
-            and not any(self.draft["throughput"].values())
+            and isinstance(candidate.get("throughput"), dict)
+            and all(value is None or value == "" for value in candidate["throughput"].values())
         ):
-            self.draft.pop("throughput")
-        issues = METHODS[self.session.method_id].validate(self.draft)
+            candidate.pop("throughput")
+        try:
+            issues = METHODS[self.session.method_id].validate(candidate)
+            result = METHODS[self.session.method_id].calculate(candidate) if not issues else None
+        except Exception:
+            issues = ["Input has an invalid shape or an out-of-range value; review the worksheet."]
         if issues:
             self.query_one("#form-error", Static).update("Please review: " + " ".join(issues))
             return
-        if self.save_timer is not None:
-            self.flush_save()
-        self.session.method_state = deepcopy(self.draft)
+        candidate.pop("_example_loaded", None)
+        self.draft = candidate
+        self.session.method_state = deepcopy(candidate)
         self.session.completed_at = timestamp()
-        self.app.store.save(self.session, "Completed " + METHODS[self.session.method_id].name)
+        try:
+            self.app.store.save(self.session, "Completed " + METHODS[self.session.method_id].name)
+        except (sqlite3.Error, ValueError) as exc:
+            self.query_one("#form-error", Static).update(f"Could not save: {exc}. Keep this screen open.")
+            return
         self.query_one("#form-error", Static).update("Saved · results calculated locally.")
-        self.preview_result()
+        if self.session.method_id == "monte_carlo":
+            from .reports import plain_result
+
+            self.query_one("#form-results", Static).update(
+                "Simulation results · calculated locally:\n" + plain_result(result)
+            )
+        else:
+            self.preview_result()
 
     def action_advanced(self) -> None:
         self.app.open_session(self.session, advanced=True)
@@ -610,11 +822,25 @@ class FormScreen(Screen):
             self.notify("Enter an export path", severity="warning")
             return
         try:
-            export(self.session, Path(value).expanduser(), store=self.app.store)
+            export(self.session, user_path(value), store=self.app.store)
         except (ValueError, OSError) as exc:
             self.notify(str(exc), severity="error")
             return
         self.notify(f"Exported {value}")
+
+    def action_explain(self) -> None:
+        if self.save_timer is not None:
+            self.flush_save()
+        self.app.push_screen(ExplainDialog(self.session))
+
+    def browse_export(self, input_id: str) -> None:
+        def chosen(path: Path | None) -> None:
+            if path is not None:
+                self.app.last_export_dir = path.parent
+                self.query_one(input_id, Input).value = str(path)
+                self.action_export()
+
+        self.app.push_screen(ExportPicker(suggested_filename(self.session.title), self.app.last_export_dir), chosen)
 
     def action_project(self) -> None:
         if self.save_timer is not None:
@@ -622,14 +848,16 @@ class FormScreen(Screen):
         self.app.show_project()
 
     def suggest(self, ident: str) -> None:
-        if ident not in self.fields:
+        if ident not in self.fields or not can_draft_path(self.session.method_id, self.fields[ident][0]):
             return
+        self.ai_path = self.fields[ident][0]
         self.ai_target, self.ai_group = ident, None
         self.request_ai(self.fields[ident][1].label, rows=False)
 
     def suggest_rows(self, group: str) -> None:
-        if group not in self.groups:
+        if group not in self.groups or not can_draft_path(self.session.method_id, self.groups[group]):
             return
+        self.ai_path = self.groups[group]
         self.ai_target, self.ai_group = None, group
         self.request_ai(title(str(self.groups[group][-1])), rows=True)
 
@@ -673,20 +901,38 @@ class FormScreen(Screen):
             self.query_one("#form-preview", TextArea).load_text(answer)
             self.ai_ready = True
             status.update(f"{self.ai_destination}\n{provider} · edit, Accept or Dismiss. Not saved.")
+        except AISetupRequired as exc:
+            status.update("AI request not sent. Complete setup in Settings.")
+            prompt_ai_setup(self.app, exc)
         except ValueError as exc:
             status.update(str(exc))
-        except (RuntimeError, KeyError) as exc:
-            status.update(f"AI unavailable: {public_error(exc)}. Your analysis is preserved.")
+        except Exception as exc:
+            if prompt_missing_key(self.app, exc):
+                status.update("API key needed or rejected. No draft was accepted.")
+            else:
+                status.update(f"AI unavailable: {public_error(exc)}. Your analysis is preserved.")
 
     def accept(self) -> None:
         if not self.ai_ready or any(w.group == "form-ai" and w.is_running for w in self.workers):
             return
         text = self.query_one("#form-preview", TextArea).text.strip()
+        from .field_ai import text_only
+
+        if text_only(text) != text:
+            self.query_one("#form-ai-status", Static).update("Remove numeric judgments before accepting AI text.")
+            return
         if not text:
             self.query_one("#form-ai-status", Static).update("Enter text before accepting.")
             return
         if self.ai_target and self.ai_target in self.fields:
             ident = self.ai_target
+            if self.fields[ident][0] != getattr(self, "ai_path", None) or not can_draft_path(
+                self.session.method_id, self.fields[ident][0]
+            ):
+                self.query_one("#form-ai-status", Static).update(
+                    "Fields changed; request a fresh draft before accepting."
+                )
+                return
             self.change(ident, text)
             widget = self.query_one(f"#{ident}")
             if isinstance(widget, TextArea):
@@ -695,8 +941,21 @@ class FormScreen(Screen):
                 widget.value = text
         elif self.ai_group and self.ai_group in self.groups:
             path = self.groups[self.ai_group]
+            if path != getattr(self, "ai_path", None) or not can_draft_path(self.session.method_id, path):
+                self.query_one("#form-ai-status", Static).update(
+                    "Rows changed; request a fresh draft before accepting."
+                )
+                return
             spec = self.group_specs[self.ai_group]
-            child = next((child for child in spec.children if child.kind in {"text", "long_text"}), None)
+            child = next(
+                (
+                    child
+                    for child in spec.children
+                    if child.kind in {"text", "long_text"}
+                    and can_draft_path(self.session.method_id, (*path, child.key))
+                ),
+                None,
+            )
             if child is None:
                 return
             rows = list(self.value_at(path) or [])
@@ -711,7 +970,8 @@ class FormScreen(Screen):
             self.put(path, rows)
             normalize_ids(self.draft)
             self.session.method_state = deepcopy(self.draft)
-            self.app.store.save(self.session, "Accepted edited text suggestions")
+            if not self._save_draft("Accepted edited text suggestions"):
+                return
             self.run_worker(self.recompose_fields())
         else:
             return

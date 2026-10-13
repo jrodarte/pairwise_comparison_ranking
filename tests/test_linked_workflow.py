@@ -14,6 +14,7 @@ from thinktui.planning import begin_workflow, continue_workflow, planned_next, t
 from thinktui.planning_screen import PlanningScreen
 from thinktui.screens import Workspace
 from thinktui.storage import Store
+from thinktui.text_field import TextField
 
 
 def test_plan_is_sequential_and_cannot_invent_judgments():
@@ -63,7 +64,7 @@ async def test_linked_matrix_ahp_finish_and_export(tmp_path):
         await pilot.pause()
         planning = app.screen
         planning.query_one("#goal", Select).value = "Choose between options"
-        planning.query_one("#workflow-problem", Input).value = "Which provider should we choose?"
+        planning.query_one("#workflow-problem", TextField).value = "Which provider should we choose?"
         planning.query_one("#workflow", Button).press()
         await pilot.pause()
         assert isinstance(app.screen, GuidedScreen)
@@ -165,8 +166,8 @@ async def test_plan_from_worksheet_to_next_stage(tmp_path):
         assert app.session.method_state["workflow_index"] == 2
         assert app.session.method_state["source_session_id"] == worksheet.id
         final = app.session
-        app.screen.query_one("#entry", Input).value = "Provider might fail"
-        app.screen.query_one("#action", Input).value = "Test the fallback"
+        app.screen.query_one("#entry", TextField).value = "Provider might fail"
+        app.screen.query_one("#action", TextField).value = "Test the fallback"
         app.screen.query_one("#add", Button).press()
         await pilot.pause()
         assert not store.load(final.id).method_state.get("entries")  # no invented ratings

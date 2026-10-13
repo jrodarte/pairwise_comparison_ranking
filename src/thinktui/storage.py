@@ -5,19 +5,85 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from contextlib import contextmanager
 from copy import deepcopy
-from dataclasses import asdict
+from dataclasses import asdict, fields
+from datetime import datetime
+from math import isfinite
 from pathlib import Path
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from platformdirs import user_data_path
 
-from .ai import PRESETS, PROVIDER_CHOICES
+from .ai import EFFORT_LEVELS, EFFORT_PROVIDERS, PRESETS, PROVIDER_CHOICES, config_for, effort_levels
 from .core import Session, timestamp
 
-SETTING_KEYS = {"ai_provider", "ai_consent", "ollama_host", "ollama_model", "openai_model"}
+
+def _snapshot_json(value: object) -> None:
+    """Bound imported JSON before it can reach recursive renderers or calculations."""
+    pending = [(value, 0)]
+    count = 0
+    while pending:
+        item, depth = pending.pop()
+        count += 1
+        if count > 100_000 or depth > 60:
+            raise ValueError("Snapshot is too large or deeply nested")
+        if isinstance(item, dict):
+            if any(not isinstance(key, str) for key in item):
+                raise ValueError("Snapshot keys must be text")
+            pending.extend((child, depth + 1) for child in item.values())
+        elif isinstance(item, list):
+            pending.extend((child, depth + 1) for child in item)
+        elif not (item is None or isinstance(item, (str, bool, int)) or isinstance(item, float) and isfinite(item)):
+            raise ValueError("Snapshot contains a non-finite or invalid value")
+
+
+def _date(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        datetime.fromisoformat(value)
+        return True
+    except ValueError:
+        return False
+
+
+def _session_fields(row: dict) -> None:
+    names = {field.name for field in fields(Session)}
+    if set(row) != names:
+        raise ValueError("Snapshot has missing or unknown analysis fields")
+    for key in ("id", "project_id", "method_id", "title", "problem_statement", "objective", "context", "notes"):
+        if not isinstance(row[key], str):
+            raise ValueError(f"Snapshot analysis {key} must be text")
+    for key in ("created_at", "updated_at"):
+        if not _date(row[key]):
+            raise ValueError(f"Snapshot analysis {key} must be a date")
+    if row["completed_at"] is not None and not _date(row["completed_at"]):
+        raise ValueError("Snapshot completion date is invalid")
+    for key in ("stakeholders", "constraints"):
+        if not isinstance(row[key], list) or any(not isinstance(item, str) for item in row[key]):
+            raise ValueError(f"Snapshot analysis {key} must be a list of text")
+    for key in ("assumptions", "evidence", "decisions"):
+        if not isinstance(row[key], list) or any(not isinstance(item, dict) for item in row[key]):
+            raise ValueError(f"Snapshot analysis {key} must be a list of objects")
+    state = row["method_state"]
+    if not isinstance(state, dict):
+        raise ValueError("Snapshot method state must be an object")
+
+
+SETTING_KEYS = {
+    "ai_provider",
+    "ai_consent",
+    "ollama_host",
+    "ollama_model",
+    "openai_model",
+    "theme",
+    "export_dir",
+    "coach_open",
+}
 CONSENT_SETTING = re.compile(r"ai\.([a-z_]+)\.consent")
-PROVIDER_SETTING = re.compile(r"ai\.([a-z_]+)\.(model|base_url|consent_url)")
+PROVIDER_SETTING = re.compile(r"ai\.([a-z_]+)\.(model|base_url|consent_url|effort)")
 
 
 def remap_audit_changes(changes: list, ids: dict[str, str]) -> list:
@@ -84,19 +150,41 @@ class Store:
     def __init__(self, path: Path | None = None) -> None:
         self.path = path or user_data_path("thinktui") / "thinktui.db"
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(self.path)
+        self.db = sqlite3.connect(self.path, isolation_level=None, timeout=10)
         self.db.row_factory = sqlite3.Row
-        self.db.execute("PRAGMA foreign_keys=ON")
-        self.db.execute("PRAGMA journal_mode=WAL")
-        self.migrate()
+        try:
+            self.db.execute("PRAGMA foreign_keys=ON")
+            self.migrate()
+            try:
+                self.db.execute("PRAGMA journal_mode=WAL")
+            except sqlite3.OperationalError as exc:
+                # A second instance may be upgrading under an exclusive schema lock.
+                # DELETE journal mode is safe until a later connection enables WAL.
+                if "locked" not in str(exc):
+                    raise
+            # Repository writes continue to use sqlite3's transactional `with db`.
+            self.db.isolation_level = "DEFERRED"
+        except Exception:
+            self.db.close()
+            raise
+
+    @contextmanager
+    def _migration(self):
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            yield
+            self.db.execute("COMMIT")
+        except BaseException:
+            self.db.execute("ROLLBACK")
+            raise
 
     def migrate(self) -> None:
-        with self.db:
+        with self._migration():
             version = self.db.execute("PRAGMA user_version").fetchone()[0]
-            if version > 5:
+            if version > 7:
                 raise ValueError("Database created by a newer ThinkTUI")
             if version == 0:
-                self.db.executescript("""
+                schema = """
                     CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT NOT NULL,
                         created_at TEXT NOT NULL);
                     CREATE TABLE sessions (id TEXT PRIMARY KEY, project_id TEXT NOT NULL
@@ -106,8 +194,11 @@ class Store:
                     CREATE TABLE events (id INTEGER PRIMARY KEY, session_id TEXT NOT NULL
                         REFERENCES sessions(id), timestamp TEXT NOT NULL, description TEXT NOT NULL);
                     CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-                    PRAGMA user_version=1;
-                """)
+                """
+                for statement in schema.split(";"):
+                    if statement.strip():
+                        self.db.execute(statement)
+                self.db.execute("PRAGMA user_version=1")
                 version = 1
             if version == 1:
                 self.db.execute("ALTER TABLE events ADD COLUMN changes TEXT NOT NULL DEFAULT '[]'")
@@ -142,6 +233,30 @@ class Store:
                     timestamp TEXT NOT NULL, before TEXT NOT NULL, after TEXT NOT NULL
                 )""")
                 self.db.execute("PRAGMA user_version=5")
+                version = 5
+            if version == 5:
+                # Ordinary audit events cannot be rewritten. The only exception is
+                # an explicitly requested destructive analysis/project deletion, and
+                # its scoped permission lives only inside that transaction.
+                self.db.execute("CREATE TABLE event_delete_permissions (session_id TEXT PRIMARY KEY)")
+                self.db.execute("""CREATE TRIGGER events_no_update BEFORE UPDATE ON events
+                    BEGIN SELECT RAISE(ABORT, 'Audit events cannot be updated'); END""")
+                self.db.execute("""CREATE TRIGGER events_no_delete BEFORE DELETE ON events
+                    WHEN NOT EXISTS (SELECT 1 FROM event_delete_permissions
+                                     WHERE session_id=OLD.session_id)
+                    BEGIN SELECT RAISE(ABORT, 'Audit events cannot be deleted'); END""")
+                self.db.execute("PRAGMA user_version=6")
+                version = 6
+            if version == 6:
+                # Co-planner: user-approved memory shared across projects, and a conversation log.
+                # Neither is part of analyses, events or snapshots.
+                self.db.execute("""CREATE TABLE IF NOT EXISTS coach_memory (
+                    id INTEGER PRIMARY KEY, text TEXT NOT NULL, created_at TEXT NOT NULL)""")
+                self.db.execute("""CREATE TABLE IF NOT EXISTS coach_messages (
+                    id INTEGER PRIMARY KEY, project_id TEXT REFERENCES projects(id),
+                    role TEXT NOT NULL CHECK (role IN ('user', 'coach')), text TEXT NOT NULL,
+                    created_at TEXT NOT NULL)""")
+                self.db.execute("PRAGMA user_version=7")
 
     def new_project(self, name: str) -> str:
         if not name.strip():
@@ -179,10 +294,16 @@ class Store:
         with self.db:
             self.project(project_id)  # refuse stale selections without touching other projects
             self.db.execute("DELETE FROM project_events WHERE project_id=?", (project_id,))
+            self.db.execute("DELETE FROM coach_messages WHERE project_id=?", (project_id,))
+            self.db.execute(
+                "INSERT OR IGNORE INTO event_delete_permissions SELECT id FROM sessions WHERE project_id=?",
+                (project_id,),
+            )
             self.db.execute(
                 "DELETE FROM events WHERE session_id IN (SELECT id FROM sessions WHERE project_id=?)", (project_id,)
             )
             self.db.execute("DELETE FROM sessions WHERE project_id=?", (project_id,))
+            self.db.execute("DELETE FROM event_delete_permissions")
             self.db.execute("DELETE FROM projects WHERE id=?", (project_id,))
 
     def snapshot(self, project_id: str) -> dict:
@@ -217,12 +338,16 @@ class Store:
 
         from . import methods as _methods  # noqa: F401 - ensure method registry is available
         from .core import METHODS
+        from .snapshot_validation import validate_state
 
+        _snapshot_json(data)
         if not isinstance(data, dict) or data.get("snapshot_version") != 1:
             raise ValueError("Unsupported project snapshot")
         project = data.get("project", {})
         if not isinstance(project, dict) or not isinstance(project.get("name"), str) or not project["name"].strip():
             raise ValueError("Snapshot needs a named project")
+        if not _date(project.get("created_at")):
+            raise ValueError("Snapshot project creation date is invalid")
         if not isinstance(project.get("planning_question", ""), str):
             raise ValueError("Snapshot planning question must be text")
         analyses = data.get("sessions", [])
@@ -236,13 +361,19 @@ class Store:
             if not isinstance(project.get("id"), str) or any(not isinstance(row, dict) for row in analyses):
                 raise ValueError("Malformed project snapshot")
             for row in analyses:
-                if (
-                    not isinstance(row.get("method_state"), dict)
-                    or not isinstance(row.get("title"), str)
-                    or not row["title"].strip()
-                    or not isinstance(row.get("completed_at"), (str, type(None)))
-                ):
-                    raise ValueError("Snapshot has invalid analysis fields")
+                _session_fields(row)
+                if not row["title"].strip():
+                    raise ValueError("Snapshot has an unnamed analysis")
+                if row["method_id"] not in METHODS:
+                    raise ValueError("Snapshot contains an unknown method")
+                validate_state(row["method_id"], row["method_state"])
+                if row["completed_at"] and row["method_state"]:
+                    try:
+                        issues = METHODS[row["method_id"]].validate(row["method_state"])
+                    except Exception as exc:
+                        raise ValueError("Snapshot completed analysis has invalid inputs") from exc
+                    if issues:
+                        raise ValueError("Snapshot completed analysis has invalid inputs")
             sessions = [Session(**row) for row in analyses]
             for row in events:
                 if isinstance(row, dict) and isinstance(row.get("session_id"), str):
@@ -257,7 +388,8 @@ class Store:
                 raise ValueError("Snapshot contains an invalid project or method reference")
             if any(
                 not isinstance(row, dict)
-                or not all(isinstance(row.get(key), str) for key in ("timestamp", "before", "after"))
+                or not _date(row.get("timestamp"))
+                or not all(isinstance(row.get(key), str) for key in ("before", "after"))
                 for row in project_events
             ):
                 raise ValueError("Snapshot contains an invalid planning event")
@@ -268,7 +400,7 @@ class Store:
                     not isinstance(entry, dict) or not isinstance(entry.get("field"), str) for entry in row["changes"]
                 )
                 or not isinstance(row["description"], str)
-                or not isinstance(row["timestamp"], str)
+                or not _date(row["timestamp"])
                 for row in events
             ):
                 raise ValueError("Snapshot contains an invalid event")
@@ -301,7 +433,11 @@ class Store:
                 )
             for row in events:
                 description = row["description"]
-                for prefix in ("Linked from analysis ", "Created sensitivity analysis from "):
+                for prefix in (
+                    "Linked from analysis ",
+                    "Created sensitivity analysis from ",
+                    "Duplicated from analysis ",
+                ):
                     if description.startswith(prefix):
                         description = prefix + remapped.get(description[len(prefix) :], description[len(prefix) :])
                 self.db.execute(
@@ -335,13 +471,15 @@ class Store:
         with self.db:
             previous = self.db.execute("SELECT data FROM sessions WHERE id=?", (session.id,)).fetchone()
             before = json.loads(previous[0]) if previous else {}
+            if before and session.updated_at != before["updated_at"]:
+                raise ValueError("Analysis changed in another window; reload before editing to avoid overwriting it")
             after = asdict(session)
             if before and not field_changes(before, after):
                 return
             old_state = before.get("method_state", {})
             new_state = session.method_state
-            meaningful = {k: v for k, v in old_state.items() if k != "_guided_step"} != {
-                k: v for k, v in new_state.items() if k != "_guided_step"
+            meaningful = {k: v for k, v in old_state.items() if not k.startswith("_")} != {
+                k: v for k, v in new_state.items() if not k.startswith("_")
             }
             if before and before.get("completed_at") == session.completed_at and meaningful:
                 session.completed_at = None
@@ -365,9 +503,11 @@ class Store:
 
     def delete_session(self, session_id: str) -> None:
         with self.db:
+            self.db.execute("INSERT OR IGNORE INTO event_delete_permissions VALUES (?)", (session_id,))
             self.db.execute("DELETE FROM events WHERE session_id=?", (session_id,))
             if self.db.execute("DELETE FROM sessions WHERE id=?", (session_id,)).rowcount != 1:
                 raise KeyError(session_id)
+            self.db.execute("DELETE FROM event_delete_permissions WHERE session_id=?", (session_id,))
 
     def duplicate_session(self, session_id: str, target_project_id: str | None = None) -> Session:
         original = self.load(session_id)
@@ -451,8 +591,11 @@ class Store:
         row = self.db.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
         return row[0] if row else default
 
-    def set_setting(self, key: str, value: str) -> None:
-        """Non-secret preferences only; API keys belong to the OS keyring (see credentials.py)."""
+    @staticmethod
+    def validate_setting(key: str, value: str) -> None:
+        """Reject unsupported preferences and URL credentials before a transaction begins."""
+        if not isinstance(value, str):
+            raise ValueError("Setting values must be text")
         provider = PROVIDER_SETTING.fullmatch(key)
         consent = CONSENT_SETTING.fullmatch(key)
         if (
@@ -461,9 +604,20 @@ class Store:
             and not (consent and consent.group(1) in PRESETS)
         ):
             raise ValueError("Unsupported setting")
+        if (
+            provider
+            and provider.group(2) == "effort"
+            and (value not in EFFORT_LEVELS or (value and provider.group(1) not in EFFORT_PROVIDERS))
+        ):
+            raise ValueError("Unsupported thinking level for provider")
         if key == "ai_provider" and value not in PROVIDER_CHOICES:
             raise ValueError("Unsupported provider")
-        if (key == "ai_consent" or consent) and value not in {"yes", "no"}:
+        if key == "theme":
+            from .themes import THEMES
+
+            if value not in THEMES:
+                raise ValueError("Unsupported theme")
+        if (key == "ai_consent" or key == "coach_open" or consent) and value not in {"yes", "no"}:
             raise ValueError("Invalid consent")
         if (
             (key.endswith(("base_url", "consent_url")) or key == "ollama_host")
@@ -471,13 +625,77 @@ class Store:
             and not value.startswith(("http://", "https://"))
         ):
             raise ValueError("Base URL must start with http:// or https://")
+        if (key.endswith(("base_url", "consent_url")) or key == "ollama_host") and value:
+            parts = urlsplit(value)
+            if parts.username or parts.password or not parts.hostname:
+                raise ValueError("URL must have a host and no embedded credentials")
         if len(value) > 500 or "\n" in value:
             raise ValueError("Invalid setting value")
+
+    def set_settings(self, values: dict[str, str]) -> None:
+        """Validate every non-secret preference, then commit all of them together."""
+        for key, value in values.items():
+            self.validate_setting(key, value)
+        for preset_id in PRESETS:
+            model_key, effort_key = f"ai.{preset_id}.model", f"ai.{preset_id}.effort"
+            if model_key not in values and effort_key not in values:
+                continue
+            model = values.get(model_key, config_for(self, preset_id).model) or PRESETS[preset_id].default_model
+            effort = values.get(effort_key, self.setting(effort_key))
+            if effort not in effort_levels(preset_id, model):
+                raise ValueError("Unsupported thinking level for provider model; choose Provider default")
+        with self.db:
+            self.db.executemany(
+                "INSERT INTO settings VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                values.items(),
+            )
+
+    def set_setting(self, key: str, value: str) -> None:
+        """Non-secret preferences only; API keys belong to the OS keyring."""
+        self.set_settings({key: value})
+
+    def coach_memory(self) -> list[sqlite3.Row]:
+        return self.db.execute("SELECT id, text, created_at FROM coach_memory ORDER BY id").fetchall()
+
+    def add_coach_memory(self, text: str) -> None:
+        """Only text the user typed or explicitly accepted; one short line per fact."""
+        text = " ".join(text.split())
+        if not text:
+            raise ValueError("Memory text is required")
+        if len(text) > 500:
+            raise ValueError("Keep each memory under 500 characters")
+        with self.db:
+            self.db.execute("INSERT INTO coach_memory (text, created_at) VALUES (?, ?)", (text, timestamp()))
+
+    def delete_coach_memory(self, memory_id: int) -> None:
+        with self.db:
+            self.db.execute("DELETE FROM coach_memory WHERE id=?", (memory_id,))
+
+    def clear_coach_memory(self) -> None:
+        with self.db:
+            self.db.execute("DELETE FROM coach_memory")
+
+    def coach_messages(self, limit: int = 40) -> list[sqlite3.Row]:
+        rows = self.db.execute(
+            "SELECT id, project_id, role, text, created_at FROM coach_messages ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return rows[::-1]
+
+    def add_coach_message(self, role: str, text: str, project_id: str | None = None) -> None:
+        if (
+            project_id is not None
+            and not self.db.execute("SELECT 1 FROM projects WHERE id=?", (project_id,)).fetchone()
+        ):
+            project_id = None
         with self.db:
             self.db.execute(
-                "INSERT INTO settings VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                (key, value),
+                "INSERT INTO coach_messages (project_id, role, text, created_at) VALUES (?, ?, ?, ?)",
+                (project_id, role, text, timestamp()),
             )
+
+    def clear_coach_messages(self) -> None:
+        with self.db:
+            self.db.execute("DELETE FROM coach_messages")
 
     def close(self) -> None:
         self.db.close()

@@ -9,7 +9,7 @@ from datetime import date
 from pairwise_prioritizer.models import Project
 from pairwise_prioritizer.ranking import BradleyTerry
 
-from .core import register
+from .core import ASSUMPTION_STATUSES, assumption_quadrant, assumption_review, register
 from .issue_tree import nested, nodes_for
 
 
@@ -21,9 +21,19 @@ class Pairwise:
     description: str = "Compare every pair; calculate Bradley–Terry strengths."
 
     def validate(self, state: dict) -> list[str]:
-        return [] if "ranking" in state else ["Add at least two items."]
+        if not isinstance(state, dict) or not isinstance(state.get("ranking"), dict):
+            return ["Add at least two items."]
+        try:
+            project = Project.from_dict(state["ranking"])
+            if len(project.items) < 2:
+                return ["Add at least two items."]
+        except Exception:
+            return ["Comparison set has invalid items or judgments."]
+        return []
 
     def calculate(self, state: dict) -> dict:
+        if issues := self.validate(state):
+            raise ValueError(" ".join(issues))
         project = Project.from_dict(state["ranking"])
         rows = BradleyTerry().calculate(project.items, list(project.comparisons.values()))
         return {
@@ -56,23 +66,40 @@ class Matrix:
 
     def validate(self, state: dict) -> list[str]:
         issues = []
-        criteria = state.get("criteria", [])
-        alternatives = state.get("alternatives", [])
+        criteria = state.get("criteria", []) if isinstance(state, dict) else []
+        alternatives = state.get("alternatives", []) if isinstance(state, dict) else []
+        if (
+            not isinstance(criteria, list)
+            or not isinstance(alternatives, list)
+            or any(not isinstance(row, dict) for row in [*criteria, *alternatives])
+        ):
+            return ["Criteria and alternatives must be lists of named rows."]
+        for label, rows in (("Criterion", criteria), ("Alternative", alternatives)):
+            names = [row.get("name") for row in rows]
+            if any(not isinstance(value, str) or not value.strip() for value in names):
+                issues.append(f"{label} names must be distinct nonblank text.")
+            elif len(set(names)) != len(names):
+                issues.append(f"{label} names must be distinct nonblank text.")
         if len(criteria) < 1 or len(alternatives) < 2:
             issues.append("Enter criteria and at least two alternatives.")
         weights = [c.get("weight") for c in criteria]
         if (
             not weights
             or any(type(w) not in (int, float) or not math.isfinite(w) or w < 0 for w in weights)
+            or not math.isfinite(sum(w for w in weights if type(w) in (int, float) and math.isfinite(w)))
             or sum(w for w in weights if type(w) in (int, float) and math.isfinite(w)) <= 0
         ):
             issues.append("Weights must be finite, nonnegative numbers with a positive total.")
         if any(c.get("direction", "benefit") not in ("cost", "benefit") for c in criteria):
             issues.append("Direction must be benefit or cost.")
         for alternative in alternatives:
-            if len(alternative.get("scores", [])) != len(criteria):
+            if not isinstance(alternative.get("scores", []), list) or len(alternative.get("scores", [])) != len(
+                criteria
+            ):
                 issues.append("Each alternative needs one score per criterion.")
-            elif any(not isinstance(s, (int, float)) or not 0 <= s <= 10 for s in alternative["scores"]):
+            elif any(
+                type(s) not in (int, float) or not math.isfinite(s) or not 0 <= s <= 10 for s in alternative["scores"]
+            ):
                 issues.append("Scores must be numbers between 0 and 10.")
         return issues
 
@@ -98,24 +125,57 @@ class Matrix:
         return f"Top alternative: {result['ranking'][0]['name']} ({result['ranking'][0]['score']:.2f}/10)."
 
 
+def _optional_text_issue(row: dict, keys: tuple[str, ...], label: str) -> str:
+    for key in keys:
+        if key in row and row[key] is not None and not isinstance(row[key], str):
+            return f"{label} {key.replace('_', ' ')} must be text."
+    return ""
+
+
 @dataclass(frozen=True)
 class Assumptions:
     id: str = "assumptions"
     name: str = "Key Assumptions Check"
     category: str = "Problem Analysis"
     description: str = "Identify low-confidence, high-impact assumptions and validation tests."
+    # Optional per-assumption planning fields; ratings stay separate and user-supplied.
+    TEXT_FIELDS = ("action", "basis", "change_mind")
 
     def validate(self, state: dict) -> list[str]:
-        return [] if state.get("entries") else ["Add at least one assumption."]
+        rows = state.get("entries") if isinstance(state, dict) else None
+        if not isinstance(rows, list) or not rows:
+            return ["Add at least one assumption."]
+        for index, row in enumerate(rows, 1):
+            if not isinstance(row, dict) or not isinstance(row.get("statement"), str) or not row["statement"].strip():
+                return [f"Assumption {index} needs a statement."]
+            for key, low, high in (("confidence", 0, 100), ("impact", 1, 10)):
+                value = row.get(key)
+                if type(value) is not int or not low <= value <= high:
+                    return [f"Assumption {index} {key} must be your whole-number rating from {low} to {high}."]
+            if issue := _optional_text_issue(row, self.TEXT_FIELDS, f"Assumption {index}"):
+                return [issue]
+            if row.get("status") not in (None, "", *ASSUMPTION_STATUSES):
+                return [f"Assumption {index} status must be one of: {', '.join(ASSUMPTION_STATUSES)}."]
+        return []
+
+    @staticmethod
+    def risk(row: dict) -> float:
+        return (1 - row["confidence"] / 100) * row["impact"]
+
+    @staticmethod
+    def quadrant(row: dict) -> str:
+        return assumption_quadrant(row["confidence"] < 50, row["impact"] >= 6)
 
     def calculate(self, state: dict) -> dict:
-        rows = state.get("entries", [])
+        if issues := self.validate(state):
+            raise ValueError(" ".join(issues))
+        # Sorted rows are the saved entry objects so editors can map back to them.
+        rows = sorted(state["entries"], key=self.risk, reverse=True)
         return {
-            "priorities": sorted(
-                rows,
-                key=lambda r: (1 - r.get("confidence", 50) / 100) * r.get("impact", 5),
-                reverse=True,
-            )
+            "priorities": rows,
+            "quadrants": [f"{self.quadrant(row)}: {row['statement']}" for row in rows],
+            "review": assumption_review([(row["statement"], self.quadrant(row), row.get("status")) for row in rows]),
+            "note": "Quadrants: confidence below 50 is low; impact 6 or more is high. Ratings are your judgments.",
         }
 
     def summarize(self, state: dict) -> str:
@@ -128,18 +188,31 @@ class Premortem:
     name: str = "Premortem"
     category: str = "Risk"
     description: str = "Imagine failure, record causes, then assign preventive actions."
+    TEXT_FIELDS = ("action", "category", "owner", "warning_sign")
 
     def validate(self, state: dict) -> list[str]:
-        return [] if state.get("entries") else ["Add at least one failure mode."]
+        rows = state.get("entries") if isinstance(state, dict) else None
+        if not isinstance(rows, list) or not rows:
+            return ["Add at least one failure mode."]
+        for index, row in enumerate(rows, 1):
+            if not isinstance(row, dict) or not isinstance(row.get("statement"), str) or not row["statement"].strip():
+                return [f"Failure mode {index} needs a statement."]
+            for key, low, high in (("likelihood", 0, 100), ("impact", 1, 10)):
+                value = row.get(key)
+                if type(value) is not int or not low <= value <= high:
+                    return [f"Failure mode {index} {key} must be your whole-number rating from {low} to {high}."]
+            if issue := _optional_text_issue(row, self.TEXT_FIELDS, f"Failure mode {index}"):
+                return [issue]
+        return []
 
     def calculate(self, state: dict) -> dict:
-        return {
-            "risks": sorted(
-                state.get("entries", []),
-                key=lambda r: r.get("likelihood", 1) * r.get("impact", 1),
-                reverse=True,
-            )
-        }
+        if issues := self.validate(state):
+            raise ValueError(" ".join(issues))
+        risks = sorted(state["entries"], key=lambda r: r["likelihood"] * r["impact"], reverse=True)
+        clusters: dict[str, list[str]] = {}
+        for row in risks:
+            clusters.setdefault((row.get("category") or "").strip() or "Unclustered", []).append(row["statement"])
+        return {"risks": risks, "clusters": dict(sorted(clusters.items()))}
 
     def summarize(self, state: dict) -> str:
         return f"{len(state.get('entries', []))} potential failure modes recorded."
@@ -153,11 +226,11 @@ class IssueTree:
     description: str = "Decompose a question into testable branches."
 
     def validate(self, state: dict) -> list[str]:
-        if not nodes_for(state):
-            return ["Add at least one branch."]
         try:
+            if not nodes_for(state):
+                return ["Add at least one branch."]
             nested(state)
-        except (KeyError, ValueError) as exc:
+        except (KeyError, ValueError, TypeError) as exc:
             return [str(exc)]
         return []
 
@@ -180,17 +253,24 @@ class DecisionJournal:
 
     def validate(self, state: dict) -> list[str]:
         issues = []
-        if not state.get("decision", "").strip():
+        if not isinstance(state, dict):
+            return ["Decision journal must be an object."]
+        if not isinstance(state.get("decision"), str) or not state["decision"].strip():
             issues.append("Describe the decision.")
-        if not state.get("chosen", "").strip():
+        if not isinstance(state.get("chosen"), str) or not state["chosen"].strip():
             issues.append("Record the chosen option.")
-        review_date = state.get("review_date", "")
-        if review_date:
-            try:
-                if date.fromisoformat(review_date).isoformat() != review_date:
-                    raise ValueError
-            except (TypeError, ValueError):
-                issues.append("Review date must be YYYY-MM-DD.")
+        dates = {}
+        for key, label in (("decision_date", "Decision date"), ("review_date", "Review date")):
+            raw = state.get(key, "")
+            if raw:
+                try:
+                    if date.fromisoformat(raw).isoformat() != raw:
+                        raise ValueError
+                    dates[key] = date.fromisoformat(raw)
+                except (TypeError, ValueError):
+                    issues.append(f"{label} must be YYYY-MM-DD.")
+        if len(dates) == 2 and dates["review_date"] < dates["decision_date"]:
+            issues.append("Review date must be on or after the decision date.")
         confidence = state.get("confidence", "")
         if confidence not in ("", None):
             try:
@@ -207,12 +287,13 @@ class DecisionJournal:
         review_due = bool(
             not issues
             and review_date
-            and not state.get("actual_outcome")
+            and not str(state.get("actual_outcome") or "").strip()
             and date.fromisoformat(review_date) <= date.today()
         )
         return {
             "status": "Recorded" if not issues else "Draft",
             "decision": state.get("decision", ""),
+            "decision_date": state.get("decision_date", ""),
             "chosen": state.get("chosen", ""),
             "expected_outcome": state.get("expected_outcome", ""),
             "actual_outcome": state.get("actual_outcome", ""),

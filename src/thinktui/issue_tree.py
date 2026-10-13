@@ -9,26 +9,46 @@ def nodes_for(state: dict) -> list[dict]:
     """Read existing pre-tree flat sessions as root nodes until their next edit."""
     if "nodes" in state:
         return state["nodes"]
+    entries = state.get("entries", [])
+    if not isinstance(entries, list) or any(
+        not isinstance(row, dict) or not isinstance(row.get("statement"), str) for row in entries
+    ):
+        raise ValueError("Issue-tree entries must have text statements")
     return [
         {"id": f"legacy-{i}", "parent_id": None, "label": row["statement"], "collapsed": False}
-        for i, row in enumerate(state.get("entries", []))
+        for i, row in enumerate(entries)
     ]
 
 
 def _validated(nodes: list[dict]) -> dict[str, dict]:
-    by_id = {node["id"]: node for node in nodes}
-    if len(by_id) != len(nodes):
-        raise ValueError("Duplicate issue-tree node ID")
+    if not isinstance(nodes, list):
+        raise ValueError("Issue-tree nodes must be a list")
+    by_id = {}
     for node in nodes:
-        parent = node["parent_id"]
-        if parent is not None and parent not in by_id:
+        if (
+            not isinstance(node, dict)
+            or not isinstance(node.get("id"), str)
+            or not node["id"]
+            or not isinstance(node.get("label"), str)
+        ):
+            raise ValueError("Issue-tree nodes need text IDs and labels")
+        if node["id"] in by_id:
+            raise ValueError("Duplicate issue-tree node ID")
+        by_id[node["id"]] = node
+    for node in nodes:
+        parent = node.get("parent_id")
+        if parent is not None and (not isinstance(parent, str) or parent not in by_id):
             raise ValueError("Issue-tree node has a missing parent")
-        seen = {node["id"]}
-        while parent is not None:
-            if parent in seen:
+    finished = set()
+    for node in nodes:
+        chain = set()
+        parent = node["id"]
+        while parent is not None and parent not in finished:
+            if parent in chain:
                 raise ValueError("Issue-tree cycle detected")
-            seen.add(parent)
-            parent = by_id[parent]["parent_id"]
+            chain.add(parent)
+            parent = by_id[parent].get("parent_id")
+        finished.update(chain)
     return by_id
 
 
@@ -37,14 +57,12 @@ def nested(state: dict) -> list[dict]:
     nodes = nodes_for(state)
     _validated(nodes)
 
-    def children(parent_id: str | None) -> list[dict]:
-        return [
-            {"id": node["id"], "label": node["label"], "children": children(node["id"])}
-            for node in nodes
-            if node["parent_id"] == parent_id
-        ]
-
-    return children(None)
+    roots: list[dict] = []
+    children = {node["id"]: [] for node in nodes}
+    for node in nodes:
+        branch = {"id": node["id"], "label": node["label"], "children": children[node["id"]]}
+        (roots if node.get("parent_id") is None else children[node["parent_id"]]).append(branch)
+    return roots
 
 
 def visible(state: dict) -> list[tuple[dict, int]]:
@@ -52,14 +70,15 @@ def visible(state: dict) -> list[tuple[dict, int]]:
     _validated(nodes)
     rows: list[tuple[dict, int]] = []
 
-    def visit(parent_id: str | None, depth: int) -> None:
-        for node in nodes:
-            if node["parent_id"] == parent_id:
-                rows.append((node, depth))
-                if not node.get("collapsed"):
-                    visit(node["id"], depth + 1)
-
-    visit(None, 0)
+    children: dict[str | None, list[dict]] = {}
+    for node in nodes:
+        children.setdefault(node.get("parent_id"), []).append(node)
+    pending = [(node, 0) for node in reversed(children.get(None, []))]
+    while pending:
+        node, depth = pending.pop()
+        rows.append((node, depth))
+        if not node.get("collapsed"):
+            pending.extend((child, depth + 1) for child in reversed(children.get(node["id"], [])))
     return rows
 
 

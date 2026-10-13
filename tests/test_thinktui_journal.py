@@ -11,6 +11,7 @@ from thinktui.core import Session
 from thinktui.methods import DecisionJournal
 from thinktui.screens import History, JournalList, NewAnalysis, ProjectView, Workspace
 from thinktui.storage import Store, field_changes
+from thinktui.text_field import TextField
 
 
 def test_journal_validation_and_non_numeric_result():
@@ -44,7 +45,7 @@ def test_field_changes_and_migration_from_v1(tmp_path):
     """)
     db.close()
     store = Store(path)
-    assert store.db.execute("PRAGMA user_version").fetchone()[0] == 5
+    assert store.db.execute("PRAGMA user_version").fetchone()[0] == 7
     assert json.loads(store.events("s")[0]["changes"]) == []
     changes = field_changes({"method_state": {"chosen": "A"}}, {"method_state": {"chosen": "B"}})
     assert changes == [
@@ -79,15 +80,15 @@ async def test_journal_create_autosave_review_export_and_history(tmp_path):
             "expected_outcome": "Lower time to market",
             "risks": "Vendor lock-in",
         }.items():
-            app.screen.query_one(f"#journal-{key}", Input).value = value
+            app.screen.query_one(f"#journal-{key}").value = value
         app.screen.query_one("#journal-rationale", TextArea).load_text("Buy is reversible.")
         await pilot.pause(1.2)
         saved = store.load(session_id)
         assert saved.method_state["chosen"] == "Buy"
         assert "Buy is reversible." in saved.method_state["rationale"]
         assert json.loads(store.events(session_id)[0]["changes"])
-        app.screen.query_one("#journal-actual_outcome", Input).value = "Vendor failed"
-        app.screen.query_one("#journal-lessons", Input).value = "Pilot earlier"
+        app.screen.query_one("#journal-actual_outcome", TextField).value = "Vendor failed"
+        app.screen.query_one("#journal-lessons", TextField).value = "Pilot earlier"
         destination = tmp_path / "journal.md"
         app.screen.query_one("#export-path", Input).value = str(destination)
         await pilot.press("ctrl+e")  # export also flushes pending edits
@@ -110,7 +111,7 @@ async def test_journal_create_autosave_review_export_and_history(tmp_path):
         assert app.screen.query_one("#decisions", DataTable).row_count == 1
         await pilot.press("enter")
         assert isinstance(app.screen, Workspace)
-        assert app.screen.query_one("#journal-chosen", Input).value == "Buy"
+        assert app.screen.query_one("#journal-chosen", TextField).value == "Buy"
     store.close()
     reopened = Store(tmp_path / "journal.db")
     assert reopened.load(session_id).method_state["actual_outcome"] == "Vendor failed"

@@ -118,19 +118,24 @@ class BradleyTerry:
                 strengths = [value - mean for value in strengths]
             if largest < 1e-10:
                 break
-        ordered = sorted(range(len(items)), key=lambda i: (-strengths[i], items[i].name.casefold()))
-        return [
-            RankingResult(
-                item=items[i],
-                rank=rank,
-                score=100 * sigmoid(strengths[i]),
-                wins=wins[i],
-                losses=losses[i],
-                ties=ties[i],
-                points=wins[i] + ties[i] / 2,
+        # Coordinate updates can leave harmless floating-point noise in true ties.
+        groups = [round(value, 8) for value in strengths]
+        ordered = sorted(range(len(items)), key=lambda i: (-groups[i], items[i].name.casefold()))
+        results = []
+        for position, i in enumerate(ordered, 1):
+            rank = position if position == 1 or groups[i] != groups[ordered[position - 2]] else results[-1].rank
+            results.append(
+                RankingResult(
+                    item=items[i],
+                    rank=rank,
+                    score=100 * sigmoid(strengths[i]),
+                    wins=wins[i],
+                    losses=losses[i],
+                    ties=ties[i],
+                    points=wins[i] + ties[i] / 2,
+                )
             )
-            for rank, i in enumerate(ordered, 1)
-        ]
+        return results
 
 
 def matchup_groups(item: Item, items: Sequence[Item], comparisons: Sequence[Comparison]) -> dict[str, list[str]]:

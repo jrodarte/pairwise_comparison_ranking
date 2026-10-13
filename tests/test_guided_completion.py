@@ -9,6 +9,32 @@ from thinktui.app import ThinkApp
 from thinktui.core import Session
 from thinktui.guided_screen import GuidedScreen
 from thinktui.storage import Store
+from thinktui.text_field import TextField
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method_id", ["matrix", "ahp", "ach", "forecasting", "scenarios"])
+async def test_guided_change_mind_available_and_saved_without_completing_step(tmp_path, method_id):
+    store = Store(tmp_path / "guided.db")
+    session = Session(store.new_project("Study"), method_id, "Study")
+    store.save(session)
+    app = ThinkApp(store=store)
+    async with app.run_test() as pilot:
+        app.open_session(session, guided=True)
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, GuidedScreen)
+        screen.query_one("#guided-change-mind", TextField).value = "New evidence overturns this assessment"
+        await pilot.pause()
+        assert store.load(session.id).method_state["change_mind"] == "New evidence overturns this assessment"
+        assert store.load(session.id).completed_at is None
+        app.open_session(store.load(session.id), guided=True)
+        await pilot.pause()
+        assert app.screen.query_one("#guided-change-mind", TextField).value == "New evidence overturns this assessment"
+        app.screen.query_one("#guided-change-mind", TextField).value = ""
+        await pilot.pause()
+        assert "change_mind" not in store.load(session.id).method_state
+    store.close()
 
 
 async def fill(screen, pilot, values):

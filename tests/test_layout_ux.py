@@ -7,6 +7,7 @@ from textual.widgets import Button, Input, TextArea
 from thinktui.app import ThinkApp
 from thinktui.core import Session
 from thinktui.storage import Store
+from thinktui.text_field import TextField
 
 
 @pytest.mark.asyncio
@@ -29,7 +30,9 @@ async def test_editor_and_ai_pane_responsive(tmp_path, method_id, guided, trigge
         screen = app.screen
         editor = screen.query_one(".editor-pane")
         ai = screen.query_one(".ai-pane")
-        assert editor.region.right == ai.region.x
+        handle = screen.query_one(".pane-handle")
+        assert editor.region.right == handle.region.x
+        assert handle.region.right == ai.region.x
         assert ai.region.y == editor.region.y
         assert screen.query_one(f"#{preview}", TextArea).parent is ai
         button = screen.query_one(f"#{trigger}", Button)
@@ -48,7 +51,7 @@ async def test_editor_and_ai_pane_responsive(tmp_path, method_id, guided, trigge
         await pilot.resize_terminal(120, 40)
         await pilot.pause()
         assert not screen.query_one(".workspace-layout").has_class("narrow")
-        assert ai.region.x == editor.region.right
+        assert ai.region.x == handle.region.right
 
 
 @pytest.mark.asyncio
@@ -77,7 +80,7 @@ async def test_workspace_assumption_and_row_triggers_end_of_entry(tmp_path, meth
     async with app.run_test(size=(120, 40)) as pilot:
         app.open_session(session)
         await pilot.pause()
-        entry = app.screen.query_one("#entry", Input)
+        entry = app.screen.query_one("#entry", TextField)
         ids = ["help-entry", "help-rows"] + (["suggest"] if method_id == "assumptions" else [])
         previous_right = entry.region.right
         for ident in ids:

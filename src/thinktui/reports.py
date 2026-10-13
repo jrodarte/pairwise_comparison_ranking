@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict
 from pathlib import Path
 
@@ -17,7 +18,8 @@ def plain_result(result: dict) -> str:
         indent = "  " * depth
         if isinstance(value, dict):
             for key, entry in value.items():
-                label = key.replace("_", " ").capitalize()
+                # Field keys become labels; user-entered names (option labels) keep their own spelling.
+                label = key.replace("_", " ").capitalize() if re.fullmatch(r"[a-z0-9_]+", key) else key
                 if isinstance(entry, (dict, list)):
                     lines.append(indent + label + ":")
                     show(entry, depth + 1)
@@ -33,6 +35,15 @@ def plain_result(result: dict) -> str:
 
     show(result)
     return "\n".join(lines)
+
+
+def _table_cell(value: object) -> str:
+    return str(value).replace("\\", "\\\\").replace("|", "\\|").replace("\r", "").replace("\n", "<br>")
+
+
+def _report_body(body: str) -> str:
+    # A note or journal answer is prose, not an additional report section.
+    return re.sub(r"(?m)^(#{1,6})(?=\s)", r"\\\1", body)
 
 
 def decision_brief(session: Session, source_title: str = "") -> str:
@@ -56,7 +67,7 @@ def decision_brief(session: Session, source_title: str = "") -> str:
                     "Criteria",
                     "| Criterion | Weight | Direction |\n| --- | ---: | --- |\n"
                     + "\n".join(
-                        f"| {row.get('name', '')} | {row.get('weight', '')} | {row.get('direction', 'benefit')} |"
+                        f"| {_table_cell(row.get('name', ''))} | {_table_cell(row.get('weight', ''))} | {_table_cell(row.get('direction', 'benefit'))} |"
                         for row in criteria
                     ),
                 )
@@ -67,12 +78,16 @@ def decision_brief(session: Session, source_title: str = "") -> str:
                 (
                     "Alternatives and scores",
                     "| Option | "
-                    + " | ".join(row.get("name", "") for row in criteria)
+                    + " | ".join(_table_cell(row.get("name", "")) for row in criteria)
                     + " |\n| --- | "
                     + " | ".join("---:" for _ in criteria)
                     + " |\n"
                     + "\n".join(
-                        "| " + str(row.get("name", "")) + " | " + " | ".join(map(str, row.get("scores", []))) + " |"
+                        "| "
+                        + _table_cell(row.get("name", ""))
+                        + " | "
+                        + " | ".join(map(_table_cell, row.get("scores", [])))
+                        + " |"
                         for row in options
                     ),
                 )
@@ -81,7 +96,7 @@ def decision_brief(session: Session, source_title: str = "") -> str:
         inputs = {
             k: v
             for k, v in state.items()
-            if k not in {"change_mind", "_guided_step"} and not k.startswith("workflow_") and k != "source_session_id"
+            if k != "change_mind" and not k.startswith(("_", "workflow_")) and k != "source_session_id"
         }
         if inputs:
             sections.append(("Method inputs (user-supplied)", plain_result(inputs)))
@@ -98,7 +113,9 @@ def decision_brief(session: Session, source_title: str = "") -> str:
     return (
         "# Decision Brief\n\n"
         + f"Method: {method.name}  |  Updated: {session.updated_at}\n\n"
-        + "\n\n".join(f"## {heading}\n\n{body}" for heading, body in sections if body not in ("", None))
+        + "\n\n".join(
+            f"## {heading}\n\n{_report_body(str(body))}" for heading, body in sections if body not in ("", None)
+        )
         + "\n"
     )
 
@@ -116,7 +133,7 @@ def export(session: Session, destination: Path, *, store=None) -> None:
                 pass
         content = decision_brief(session, source_title)
     else:
-        content = json.dumps(asdict(session), indent=2, ensure_ascii=False)
+        content = json.dumps(asdict(session), indent=2, ensure_ascii=False, allow_nan=False)
     # Compose first, then create exclusively: a repeated export never destroys an earlier report.
     with destination.open("x", encoding="utf-8") as stream:
         stream.write(content)

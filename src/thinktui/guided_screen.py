@@ -9,10 +9,12 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, HorizontalScroll, Vertical, VerticalScroll
 from textual.screen import Screen
-from textual.widgets import Button, Footer, Header, Input, Label, Select, Static, TextArea
+from textual.widgets import Button, Footer, Header, Input, TextArea
 
+from .coach import CoachHost
 from .context_offers import offers
 from .core import METHODS, Session, timestamp
+from .explain import ExplainDialog
 from .field_ai import FieldHelpMixin
 from .guided_workflow import (
     GUIDED,
@@ -27,17 +29,22 @@ from .guided_workflow import (
 )
 from .label_mapping_screen import LabelMappingDialog
 from .matrix_mapping_screen import MatrixMappingDialog
+from .path_picker import ExportPicker, suggested_filename, user_path
 from .planning import planned_next, sensitivity_from_matrix, sensitivity_pair
 from .reports import export, plain_result
+from .safe_widgets import Label, Select, Static
+from .text_field import TextField
+from .workspace_layout import WorkspaceLayout
 
 
-class GuidedScreen(FieldHelpMixin, Screen):
+class GuidedScreen(CoachHost, FieldHelpMixin, Screen):
     BINDINGS = [
         ("f8", "next", "Validate & next"),
-        ("f7", "previous", "Previous"),
-        ("f6", "advanced", "Advanced JSON"),
+        Binding("f7", "previous", "Previous", priority=True),
+        Binding("f6", "advanced", "Advanced JSON", priority=True),
         ("ctrl+s", "next", "Save step"),
-        ("ctrl+e", "export", "Export"),
+        Binding("ctrl+e", "export", "Export", priority=True),
+        Binding("f9", "explain", "Explain results", priority=True),
         Binding("ctrl+g", "stop_ai", "Stop AI", priority=True),
         ("escape", "project", "Project"),
     ]
@@ -62,7 +69,7 @@ class GuidedScreen(FieldHelpMixin, Screen):
         method = METHODS[self.session.method_id]
         step = definition(self.session.method_id, self.session.method_state, self.index)
         yield Header()
-        with Horizontal(classes="workspace-layout") as layout:
+        with WorkspaceLayout() as layout:
             layout.set_class(self.size.width < 100, "narrow")
             layout.set_class(self.size.width < 72, "very-narrow")
             with VerticalScroll(classes="editor-pane"):
@@ -141,10 +148,12 @@ class GuidedScreen(FieldHelpMixin, Screen):
                             classes="muted",
                         )
                         with Horizontal(classes="field-editor"):
-                            if field.multiline:
-                                yield TextArea(field.value, id=f"field-{field.key}")
-                            else:
-                                yield Input(value=field.value, placeholder=field.label, id=f"field-{field.key}")
+                            yield TextField(
+                                field.value,
+                                placeholder=field.label,
+                                multiline=field.multiline,
+                                id=f"field-{field.key}",
+                            )
                             if self.can_suggest(field.key):
                                 yield Button(
                                     "Draft text",
@@ -153,6 +162,16 @@ class GuidedScreen(FieldHelpMixin, Screen):
                                     tooltip=f"Draft text for {field.label}; review and Accept before use",
                                 )
                         yield Static("", id=f"guided-error-{field.key}", classes="muted")
+                yield Label("What would change your mind?", classes="heading")
+                yield Static(
+                    "What observation would support or disconfirm this assessment? Optional; separate from the current step's judgments.",
+                    classes="muted",
+                )
+                yield TextField(
+                    self.session.method_state.get("change_mind", ""),
+                    placeholder="Observation that would change your assessment (optional)",
+                    id="guided-change-mind",
+                )
                 if step.review:
                     try:
                         issues = method.validate(self.session.method_state)
@@ -208,6 +227,20 @@ class GuidedScreen(FieldHelpMixin, Screen):
                     yield Input(
                         placeholder="Export decision brief: /path/to/brief.md or analysis.json", id="guided-export-path"
                     )
+                if method.id == "ach" and self.index == 1 and self.session.method_state.get("evidence"):
+                    yield Label("Saved evidence · edit any item to rate newly added hypotheses", classes="heading")
+                    yield Select(
+                        [
+                            (f"{i + 1}. {row['title']}", i)
+                            for i, row in enumerate(self.session.method_state["evidence"])
+                        ],
+                        value=0,
+                        allow_blank=False,
+                        id="saved-picker",
+                    )
+                    yield Button("Edit selected evidence", id="edit-saved")
+                    if not method.validate(self.session.method_state):
+                        yield Button("Review saved evidence (ignore unsaved entry text)", id="review-saved")
                 with Horizontal(classes="actions"):
                     yield Button("← Previous  F7", id="previous", disabled=self.index == 0)
                     yield Button(
@@ -230,10 +263,13 @@ class GuidedScreen(FieldHelpMixin, Screen):
                         yield Button("Return to saved review (discard this step's edits)", id="review")
                     if step.review:
                         yield Button("Export  Ctrl+E", id="export")
+                        yield Button("Choose location…", id="export-browse")
+                        yield Button("Explain results  F9", id="explain")
                         if planned_next(self.session):
                             yield Button("Continue planned workflow", id="plan")
                     yield Button("Advanced JSON  F6", id="advanced")
                     yield Button("Project  Esc", id="project")
+            yield Static("⋮", classes="pane-handle")
             with VerticalScroll(classes="ai-pane"):
                 yield Static("AI draft · review before accepting", classes="heading")
                 yield Static(
@@ -366,12 +402,12 @@ class GuidedScreen(FieldHelpMixin, Screen):
         }
 
     def can_suggest(self, key: str) -> bool:
+        if self.session.method_id == "ach" and key in {"title", "source", "evidence"}:
+            return False
         return key in {
             "alternatives",
             "criteria",
             "hypotheses",
-            "title",
-            "source",
             "question",
             "rationale",
             "narrative",
@@ -431,6 +467,15 @@ class GuidedScreen(FieldHelpMixin, Screen):
         return ""
 
     def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "guided-change-mind":
+            state = self.session.method_state
+            if event.value != state.get("change_mind", ""):
+                if event.value:
+                    state["change_mind"] = event.value
+                else:
+                    state.pop("change_mind", None)
+                self.app.store.save(self.session, "Edited change-of-mind observation")
+            return
         if event.input.id and event.input.id.startswith("matrix-row-") and self.matrix_rows is not None:
             _, _, index, key = event.input.id.split("-")
             if self.matrix_rows[int(index)][key] != event.value:
@@ -450,7 +495,9 @@ class GuidedScreen(FieldHelpMixin, Screen):
         if event.select.id == "forecast-picker" and event.value is not Select.BLANK:
             forecast = self.session.method_state["forecasts"][int(event.value)]
             outcome = forecast.get("outcome")
-            self.query_one("#field-outcome", Input).value = "?" if outcome is None else "yes" if outcome == 1 else "no"
+            self.query_one("#field-outcome", TextField).value = (
+                "?" if outcome is None else "yes" if outcome == 1 else "no"
+            )
         if event.select.id and event.select.id.startswith("matrix-row-") and self.matrix_rows is not None:
             _, _, index, key = event.select.id.split("-")
             value = str(event.value)
@@ -480,7 +527,7 @@ class GuidedScreen(FieldHelpMixin, Screen):
 
     def on_resize(self) -> None:
         layout = self.query_one(".workspace-layout")
-        layout.set_class(self.size.width < 100, "narrow")
+        layout.update_split(self.size.width < 100)
         layout.set_class(self.size.width < 72, "very-narrow")
 
     def on_mount(self) -> None:
@@ -505,7 +552,7 @@ class GuidedScreen(FieldHelpMixin, Screen):
             field.key: (
                 self.query_one(f"#field-{field.key}", TextArea).text
                 if field.multiline
-                else self.query_one(f"#field-{field.key}", Input).value
+                else self.query_one(f"#field-{field.key}").value
             )
             for field in step.fields
         }
@@ -572,6 +619,17 @@ class GuidedScreen(FieldHelpMixin, Screen):
         if self.index:
             self.editing_index = None
             self.index -= 1
+            if (
+                self.session.method_id == "forecasting"
+                and self.index <= 1
+                and "_draft" not in self.session.method_state
+            ):
+                forecasts = self.session.method_state.get("forecasts", [])
+                if forecasts:
+                    self.session.method_state["_forecast_edit_index"] = len(forecasts) - 1
+                    self.session.method_state["_draft"] = {
+                        key: forecasts[-1].get(key, "") for key in ("question", "resolution_date", "rationale")
+                    }
             self.matrix_rows = None
             self.session.method_state["_guided_step"] = self.index
             self.app.store.save(self.session, "Revisited guided step")
@@ -595,7 +653,7 @@ class GuidedScreen(FieldHelpMixin, Screen):
                 "source": row.get("source", ""),
                 "reliability": str(row["reliability"]),
                 **{
-                    f"rating_{i}": row["ratings"][label]
+                    f"rating_{i}": row["ratings"].get(label, "")
                     for i, label in enumerate(self.session.method_state["hypotheses"])
                 },
             }
@@ -607,7 +665,7 @@ class GuidedScreen(FieldHelpMixin, Screen):
             values = {"name": row["name"], **{f"action_{q}": row["actions"][q] for q in QUADRANTS}}
         await self.recompose()
         for key, value in values.items():
-            self.query_one(f"#field-{key}", Input).value = value
+            self.query_one(f"#field-{key}").value = value
         self.focus_first()
 
     def action_delete_saved(self) -> None:
@@ -634,6 +692,9 @@ class GuidedScreen(FieldHelpMixin, Screen):
         if self.index != final_index(self.session.method_id, self.session.method_state):
             return
         self.editing_index = None
+        if self.session.method_id == "forecasting":
+            self.session.method_state.pop("_draft", None)
+            self.session.method_state.pop("_forecast_edit_index", None)
         self.index = {"ach": 1, "forecasting": 0, "scenarios": 6}[self.session.method_id]
         self.session.method_state["_guided_step"] = self.index
         self.app.store.save(self.session, "Opened another guided entry")
@@ -670,8 +731,24 @@ class GuidedScreen(FieldHelpMixin, Screen):
         await self.recompose()
         self.focus_first()
 
+    async def action_review_saved(self) -> None:
+        if self.session.method_id != "ach" or self.index != 1:
+            return
+        issues = METHODS["ach"].validate(self.session.method_state)
+        if issues:
+            self.notify("Review saved evidence before finishing: " + "; ".join(issues), severity="warning")
+            return
+        self.index = 2
+        self.session.method_state["_guided_step"] = 2
+        self.app.store.save(self.session, "Reviewed existing ACH evidence after label edit")
+        await self.recompose()
+
     def action_advanced(self) -> None:
         self.app.open_session(self.session)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "guided-export-path":
+            self.action_export()
 
     def action_export(self) -> None:
         if self.index != final_index(self.session.method_id, self.session.method_state):
@@ -683,11 +760,23 @@ class GuidedScreen(FieldHelpMixin, Screen):
             self.notify("Enter an export path", severity="warning")
             return
         try:
-            export(self.session, Path(value).expanduser(), store=self.app.store)
+            export(self.session, user_path(value), store=self.app.store)
         except (OSError, ValueError) as exc:
             self.notify(str(exc), severity="error")
             return
         self.notify(f"Exported {value}")
+
+    def action_explain(self) -> None:
+        self.app.push_screen(ExplainDialog(self.session))
+
+    def browse_export(self) -> None:
+        def chosen(path: Path | None) -> None:
+            if path is not None:
+                self.app.last_export_dir = path.parent
+                self.query_one("#guided-export-path", Input).value = str(path)
+                self.action_export()
+
+        self.app.push_screen(ExportPicker(suggested_filename(self.session.title), self.app.last_export_dir), chosen)
 
     def action_project(self) -> None:
         self.app.show_project()
@@ -723,12 +812,18 @@ class GuidedScreen(FieldHelpMixin, Screen):
             await self.action_more()
         elif event.button.id == "edit-saved":
             await self.action_edit_saved()
+        elif event.button.id == "review-saved":
+            await self.action_review_saved()
         elif event.button.id == "delete-saved":
             self.action_delete_saved()
         elif event.button.id == "advanced":
             self.action_advanced()
         elif event.button.id == "export":
             self.action_export()
+        elif event.button.id == "export-browse":
+            self.browse_export()
+        elif event.button.id == "explain":
+            self.action_explain()
         elif event.button.id == "plan":
             self.action_plan()
         elif event.button.id == "sensitivity":

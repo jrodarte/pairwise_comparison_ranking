@@ -9,7 +9,7 @@ from pairwise_prioritizer.models import Comparison, Item, Outcome
 from pairwise_prioritizer.ranking import BradleyTerry
 
 from .advanced_decisions import StructuredMethod, name, number, probability
-from .core import register
+from .core import ASSUMPTION_STATUSES, assumption_quadrant, assumption_review, register
 from .issue_tree import nested, nodes_for
 
 
@@ -230,8 +230,24 @@ class AssumptionMapping(StructuredMethod):
     description = "Place assumptions by confidence and impact; surface what to test first."
     example = {
         "assumptions": [
-            {"statement": "API remains available", "confidence": 0.3, "impact": 9, "test": "Review SLA"},
-            {"statement": "Docs up to date", "confidence": 0.8, "impact": 3, "test": "Check samples"},
+            {
+                "statement": "API remains available",
+                "basis": "Vendor status page",
+                "confidence": 0.3,
+                "impact": 9,
+                "test": "Review SLA",
+                "change_mind": "Two outages in one quarter",
+                "status": "Untested",
+            },
+            {
+                "statement": "Docs up to date",
+                "basis": "Recent release notes",
+                "confidence": 0.8,
+                "impact": 3,
+                "test": "Check samples",
+                "change_mind": "A sample fails against the live API",
+                "status": "Supported",
+            },
         ]
     }
 
@@ -245,6 +261,12 @@ class AssumptionMapping(StructuredMethod):
             impact = number(row["impact"], "Impact", 1)
             if impact > 10:
                 raise ValueError("Impact is on a 1–10 scale")
+            status = row.get("status") or "Untested"
+            if status not in ASSUMPTION_STATUSES:
+                raise ValueError("Status must be one of: " + ", ".join(ASSUMPTION_STATUSES))
+            for key in ("basis", "change_mind"):
+                if row.get(key) is not None and not isinstance(row[key], str):
+                    raise ValueError(key.replace("_", " ").capitalize() + " must be text")
             ranked.append(
                 {
                     "statement": name(row["statement"], "Assumption"),
@@ -252,11 +274,15 @@ class AssumptionMapping(StructuredMethod):
                     "impact": impact,
                     "test": name(row["test"], "Validation test"),
                     "priority": (1 - conf) * impact,
-                    "quadrant": ("TEST FIRST" if conf < 0.5 and impact >= 6 else "Review"),
+                    "quadrant": assumption_quadrant(conf < 0.5, impact >= 6),
+                    "status": status,
+                    **{key: row[key] for key in ("basis", "change_mind") if row.get(key)},
                 }
             )
+        ranked.sort(key=lambda r: -r["priority"])
         return {
-            "priorities": sorted(ranked, key=lambda r: -r["priority"]),
+            "priorities": ranked,
+            "review": assumption_review([(r["statement"], r["quadrant"], r["status"]) for r in ranked]),
             "note": "Confidence is a user judgment, not measured probability.",
         }
 

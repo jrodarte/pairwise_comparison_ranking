@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
-from .core import METHODS
+from .core import ASSUMPTION_STATUSES, METHODS
 from .guided_workflow import Field
 
 
@@ -25,6 +25,7 @@ class FormField(Field):
     optional: bool = False
     children: tuple[FormField, ...] = ()
     show_for: tuple[str, ...] = ()  # visible only for these distribution choices
+    item_label: str = ""  # singular name of one row, e.g. "Hypothesis" for a Hypotheses list
 
 
 KEYED_GRIDS = {
@@ -54,6 +55,7 @@ ENUM_CHOICES = {
     ("fault_tree", "type"): ("event", "AND", "OR"),
     ("forecasting", "outcome"): ("Unresolved", "No", "Yes"),
     ("causal_loop", "polarity"): ("Reinforcing (+1)", "Balancing (-1)"),
+    ("assumption_mapping", "status"): ASSUMPTION_STATUSES,
 }
 KINDS = {
     "objectives": ("fundamental", "means"),
@@ -97,6 +99,163 @@ def title(key: str) -> str:
     return key.replace("_", " ").capitalize()
 
 
+# Plain-language labels where a field key alone is cryptic ("Dt", "Sd", "P if true").
+KEY_LABELS = {
+    "dt": "Time step (dt)",
+    "sd": "Standard deviation",
+    "p_if_true": "P(evidence | hypothesis true), 0–1",
+    "p_if_false": "P(evidence | hypothesis false), 0–1",
+    "scale_max": "Scale maximum",
+    "rollback_cost": "Cost to reverse",
+    "rollback_days": "Days to reverse",
+    "trigger": "Reversal trigger",
+    "research_cost": "Cost of the research or information",
+    "inside_estimate": "Your inside-view estimate",
+    "adjusted_estimate": "Your adjusted forecast",
+    "reference_class": "Reference class",
+    "new_capacity": "Proposed new capacity",
+    "root_test": "Test of the root cause",
+    "future_state": "Desired future state",
+    "target_date": "Target date",
+    "depends_on": "Depends on",
+    "change_mind": "What would change your mind?",
+    "basis": "Why do you believe it?",
+    "criteria_matrix": "Criteria comparison matrix",
+    "alternative_matrices": "Alternative comparison matrices",
+    "vary": "Criterion to vary",
+    "a": "Item A",
+    "b": "Item B",
+    "low": "Low pole",
+    "high": "High pole",
+    "low_low": "Scenario · axis 1 low, axis 2 low",
+    "low_high": "Scenario · axis 1 low, axis 2 high",
+    "high_low": "Scenario · axis 1 high, axis 2 low",
+    "high_high": "Scenario · axis 1 high, axis 2 high",
+}
+# (method, dotted path) → (label, help). Help says what to enter; "why" stays generic.
+PATH_LABELS = {
+    ("assumption_mapping", "assumptions.statement"): ("Assumption", "One testable claim your plan depends on."),
+    ("assumption_mapping", "assumptions.basis"): (
+        "Why do you believe it?",
+        "Current basis or evidence; separates an assumption from a known fact.",
+    ),
+    ("assumption_mapping", "assumptions.confidence"): ("Confidence (0–1)", "How sure you are it holds, 0–1."),
+    ("assumption_mapping", "assumptions.impact"): ("Impact if wrong (1–10)", "Consequence if it proves false."),
+    ("assumption_mapping", "assumptions.test"): ("Validation test", "How you will check this assumption."),
+    ("assumption_mapping", "assumptions.change_mind"): (
+        "Disproved if…",
+        "The test result that would show this assumption is wrong. Decide it before you test.",
+    ),
+    ("assumption_mapping", "assumptions.status"): (
+        "Test result",
+        "Untested = not yet tested; Supported = held; Weak = mixed result; Falsified = disproved.",
+    ),
+    ("ach", "evidence.source"): ("Source / provenance", "Where this evidence came from."),
+    ("evidence_matrix", "evidence.source"): ("Source / provenance", "Where this evidence came from."),
+    ("ach", "evidence.reliability"): ("Reliability (0–1)", "How much you trust this evidence, 0–1."),
+    ("evidence_matrix", "evidence.reliability"): ("Reliability (0–1)", "How much you trust this evidence, 0–1."),
+    ("expected_value", "alternatives.outcomes.name"): ("Outcome", "Name what happens, e.g. Adopted."),
+    ("expected_value", "alternatives.outcomes.probability"): (
+        "Probability (0–1)",
+        "Your chance judgment; each alternative's outcomes sum to 1.",
+    ),
+    ("expected_value", "alternatives.outcomes.value"): ("Payoff", "Value of this outcome in a shared unit."),
+    ("risk_matrix", "risks.owner"): ("Owner", "Who manages this risk."),
+    ("reference_class", "question"): ("Forecast question", "What quantity are you forecasting?"),
+    ("reference_class", "reference_class"): (
+        "Reference class",
+        "Which comparable past cases form the outside view, and why they are comparable.",
+    ),
+    ("reference_class", "cases.estimate"): ("Original estimate", "What was estimated at the start."),
+    ("reference_class", "cases.actual"): ("Actual result", "What actually happened, in the same unit."),
+    ("reference_class", "adjusted_estimate"): (
+        "Your adjusted forecast",
+        "Your final forecast after comparing the inside and outside views.",
+    ),
+    ("backcasting", "milestones.requirement"): ("What must be true by then?", "A prerequisite for the future state."),
+    ("backcasting", "milestones.depends_on"): ("Depends on", "Earlier milestones this one needs."),
+    ("five_whys", "chain.why"): ("Why?", "Ask why the previous answer happened."),
+    ("five_whys", "chain.answer"): ("Because…", "Your answer to this why."),
+    ("root_cause", "causes.claim"): ("Candidate cause", "One possible cause, stated as a claim."),
+    ("root_cause", "causes.test"): ("Test", "How to confirm or rule out this cause."),
+    ("fmea", "failure_modes.mode"): ("Failure mode", "How it can fail."),
+    ("fmea", "failure_modes.controls"): ("Existing controls", "Controls already in place."),
+    ("fmea", "failure_modes.action"): ("Recommended action", "What you will do to reduce the risk."),
+    ("hypothesis_tree", "nodes.label"): ("Hypothesis or test", "State the hypothesis or the test."),
+    ("value_focused", "objectives.why"): ("Why does it matter?", "The deeper value this objective serves."),
+    ("signposts", "indicators.current"): ("Current reading", "Latest observed value, if known."),
+}
+# Optional fields: blank is accepted and the label says so.
+OPTIONAL_PATHS = {
+    ("assumption_mapping", "assumptions.basis"),
+    ("assumption_mapping", "assumptions.change_mind"),
+    ("assumption_mapping", "assumptions.status"),
+    ("ach", "evidence.source"),
+    ("evidence_matrix", "evidence.source"),
+    ("expected_value", "alternatives.outcomes.name"),
+    ("risk_matrix", "risks.owner"),
+    ("reference_class", "question"),
+    ("reference_class", "reference_class"),
+    ("reference_class", "adjusted_estimate"),
+    ("backcasting", "milestones.owner"),
+    ("backcasting", "milestones.depends_on"),
+    ("forecasting", "forecasts.resolution_date"),
+    ("forecasting", "forecasts.rationale"),
+    ("value_focused", "objectives.why"),
+}
+SINGULAR = {
+    "hypotheses": "Hypothesis",
+    "axes": "Axis",
+    "criteria": "Criterion",
+    "alternatives": "Alternative",
+    "items": "Item",
+    "comparisons": "Comparison",
+    "drivers": "Driving force",
+    "variables": "Variable",
+    "evidence": "Evidence item",
+    "implications": "Implication",
+    "indicators": "Indicator",
+    "causes": "Cause",
+    "supporting": "Supporting evidence",
+    "contradicting": "Contradicting evidence",
+    "preventive_controls": "Preventive control",
+    "mitigating_controls": "Mitigating control",
+    "categories": "Category",
+    "chain": "Why",
+    "scenarios": "Scenario",
+    "strategies": "Strategy",
+    "nodes": "Node",
+    "branches": "Branch",
+    "children": "Child event",
+    "factors": "Factor",
+    "cases": "Case",
+    "forecasts": "Forecast",
+    "milestones": "Milestone",
+    "objectives": "Objective",
+    "failure_modes": "Failure mode",
+    "assumptions": "Assumption",
+    "risks": "Risk",
+    "threats": "Threat",
+    "consequences": "Consequence",
+    "states": "State",
+    "actions": "Action",
+    "signals": "Signal",
+    "outcomes": "Outcome",
+    "links": "Link",
+    "stages": "Stage",
+    "stocks": "Stock",
+    "flows": "Flow",
+    "values": "Value",
+    "weights": "Weight",
+    "scores": "Score",
+    "range": "Bound",
+}
+
+
+def singular(key: str) -> str:
+    return SINGULAR.get(key, title(key).removesuffix("s") or title(key))
+
+
 def slug(label: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", label.casefold()).strip("-") or "item"
 
@@ -128,7 +287,11 @@ def monte_variable_fields() -> tuple[FormField, ...]:
             kind="float",
             minimum=0 if key == "sd" else None,
             show_for=tuple(kind for kind, fields in MONTE_FIELDS.items() if key in fields),
-            help="Enter your own " + ("nonnegative standard deviation" if key == "sd" else title(key).lower()) + ".",
+            help=(
+                "Enter the log-scale mean (not the real-space average) for lognormal; ordinary mean for normal."
+                if key == "mean"
+                else "Enter your own " + ("nonnegative standard deviation" if key == "sd" else title(key).lower()) + "."
+            ),
             why="Defines the spread and center of this distribution.",
         )
         for key in ("min", "mode", "max", "mean", "sd")
@@ -303,7 +466,9 @@ def schema_for(method_id: str) -> tuple[FormField, ...]:
         return merged
 
     def build(key: str, value: Any, path: str) -> FormField:
-        label = title(key)
+        # A scalar list's "value" child is one item of its parent, e.g. one Hypothesis.
+        label = singular(path.rsplit(".", 1)[-1]) if key == "value" else KEY_LABELS.get(key, title(key))
+        label, custom_help = PATH_LABELS.get((method_id, path), (label, ""))
         if method_id in {"decision_tree", "fault_tree"} and path == "tree":
             return FormField(
                 key,
@@ -318,13 +483,14 @@ def schema_for(method_id: str) -> tuple[FormField, ...]:
         if key == "id":
             return FormField(key, label, kind="generated", help="Created from the label automatically.", why=why)
         if key == "parent_id":
+            noun = "objective" if method_id == "objectives" else "node"
             return FormField(
                 key,
-                "Parent objective",
+                f"Parent {noun}",
                 kind="reference",
                 reference="nodes",
-                help="Choose a parent or leave blank for a root.",
-                why="Parents show how objectives connect.",
+                help=f"Leave blank for a top-level {noun}. Label another {noun} before choosing it as a parent.",
+                why="Parents connect nodes within the hierarchy, not the analysis decision purpose.",
             )
         if isinstance(value, list):
             sample = merge_rows(value) if value and isinstance(value[0], dict) else value[0] if value else ""
@@ -332,6 +498,16 @@ def schema_for(method_id: str) -> tuple[FormField, ...]:
                 children = monte_variable_fields()
             elif isinstance(sample, dict):
                 children = tuple(build(k, v, f"{path}.{k}") for k, v in sample.items())
+                if method_id == "objectives" and path == "nodes":
+                    children += (
+                        FormField(
+                            "change_mind",
+                            "What would change your mind about this objective? (optional)",
+                            optional=True,
+                            help="Name an observation that would make you reconsider this outcome or means.",
+                            why="Keeps the test tied to this objective rather than the hierarchy as a whole.",
+                        ),
+                    )
             elif isinstance(sample, list):
                 children = (FormField("value", "Value", kind="text", help="Enter a value.", why=why),)
                 if method_id == "sensitivity" and path == "alternatives.scores":
@@ -349,7 +525,13 @@ def schema_for(method_id: str) -> tuple[FormField, ...]:
             else:
                 children = (build("value", sample, path),)
             return FormField(
-                key, label, kind="rows", children=children, help=f"Add as many {label.lower()} as you need.", why=why
+                key,
+                label,
+                kind="rows",
+                children=children,
+                help=f"Add as many {label.lower()} as you need.",
+                why=why,
+                item_label=singular(key),
             )
         if isinstance(value, dict):
             if (method_id, path) in KEYED_GRIDS:
@@ -475,22 +657,28 @@ def schema_for(method_id: str) -> tuple[FormField, ...]:
         if sensitivity_bound:
             low, high = 0, 1
             help_text = "Enter a bound between 0 and 1 (decimals allowed)."
+        optional = (
+            (method_id, path) in OPTIONAL_PATHS
+            or (method_id == "signposts" and path == "indicators.current")
+            or (method_id == "bottleneck" and path.startswith("proposal."))
+            or (method_id == "constraints" and path.startswith("throughput."))
+        )
+        if custom_help:
+            help_text = custom_help
+        elif kind in {"int", "float", "date"} and not (sensitivity_bound or sensitivity_score):
+            help_text = "Use YYYY-MM-DD." if kind == "date" else "Enter your own numeric judgment."
         return FormField(
             key,
-            label,
+            label + (" (optional)" if optional else ""),
             kind=kind,
             multiline=kind == "long_text",
-            help=help_text
-            if kind not in {"int", "float", "date"} or sensitivity_bound or sensitivity_score
-            else ("Use YYYY-MM-DD." if kind == "date" else "Enter your own numeric judgment."),
+            help=help_text,
             why=why,
             minimum=low,
             maximum=high,
             choices=choices,
             reference=reference,
-            optional=(method_id == "signposts" and path == "indicators.current")
-            or (method_id == "bottleneck" and path.startswith("proposal."))
-            or (method_id == "constraints" and path.startswith("throughput.")),
+            optional=optional,
         )
 
     return tuple(build(key, value, key) for key, value in example.items() if key not in HIDDEN)
@@ -511,7 +699,7 @@ def blank(field: FormField) -> Any:
 def parse(field: FormField, raw: str) -> Any:
     value = raw.strip()
     if not value:
-        return None if field.kind == "reference" or field.optional else ""
+        return None if (field.kind == "reference" or field.optional and field.kind not in {"text", "long_text"}) else ""
     if field.kind in {"int", "float"}:
         try:
             result = int(value) if field.kind == "int" else float(value)

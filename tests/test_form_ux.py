@@ -13,6 +13,7 @@ from thinktui.project_progress import checklist
 from thinktui.reports import plain_result
 from thinktui.screens import Workspace
 from thinktui.storage import Store
+from thinktui.text_field import TextField
 
 
 def test_schemas_cover_structured_methods_and_preserve_generated_references():
@@ -23,6 +24,7 @@ def test_schemas_cover_structured_methods_and_preserve_generated_references():
     normalize_ids(state)
     assert [node["id"] for node in state["nodes"]] == ["a-choice", "a-choice-2"]
     assert schema_for("objectives")[0].children[1].kind == "reference"
+    assert schema_for("objectives")[0].children[-1].key == "change_mind"
 
 
 def test_project_question_migration_and_text_only_offers(tmp_path):
@@ -101,9 +103,10 @@ def test_numeric_and_date_validation():
     assert schema_for("hypothesis_tree")[1].children[-1].choices == ("hypothesis", "test")
     assert schema_for("bradley_terry")[1].children[-1].choices == ("a_wins", "b_wins", "tie")
     assert schema_for("bradley_terry")[1].children[-1].kind == "choice"
-    assert parse(schema_for("assumption_mapping")[0].children[1], "0.3") == 0.3
+    confidence = next(child for child in schema_for("assumption_mapping")[0].children if child.key == "confidence")
+    assert parse(confidence, "0.3") == 0.3
     with pytest.raises(ValueError):
-        parse(schema_for("assumption_mapping")[0].children[1], "30")
+        parse(confidence, "30")
 
 
 @pytest.mark.asyncio
@@ -196,7 +199,8 @@ async def test_bradley_terry_outcome_is_select_and_saves_enum(tmp_path):
             await pilot.pause()
             index = len(session.method_state["items"]) - 1
             ident = next(i for i, (path, _) in app.screen.fields.items() if path == ("items", index))
-            app.screen.query_one(f"#{ident}", Input).value = label
+            app.screen.query_one(f"#{ident}", TextField).value = label
+            await pilot.pause()  # the name must reach the draft before comparison choices are built
         comparisons = next(group for group, path in app.screen.groups.items() if path == ("comparisons",))
         app.screen.query_one(f"#{comparisons}-add", Button).press()
         await pilot.pause()
@@ -232,7 +236,7 @@ async def test_legacy_grid_rename_preserves_judgments_and_collision(tmp_path):
         assert type(store.load(session.id).method_state["actions"][0]["payoffs"]["Demand"]) is int
         screen = app.screen
         ident = next(i for i, (p, _) in screen.fields.items() if p == ("states", 0, "name"))
-        editor = screen.query_one(f"#{ident}", Input)
+        editor = screen.query_one(f"#{ident}", TextField)
         editor.value = ""
         editor.value = "Storm"
         await pilot.pause()
@@ -241,7 +245,7 @@ async def test_legacy_grid_rename_preserves_judgments_and_collision(tmp_path):
         assert "Demand" not in session.method_state["actions"][0]["payoffs"]
         await screen.recompose()
         ident = next(i for i, (p, _) in screen.fields.items() if p == ("states", 0, "name"))
-        screen.query_one(f"#{ident}", Input).value = "No demand"  # never erase either judgment
+        screen.query_one(f"#{ident}", TextField).value = "No demand"  # never erase either judgment
         await pilot.pause()
         assert session.method_state["actions"][0]["payoffs"] == {"Storm": 100, "No demand": -50}
         await screen.recompose()
@@ -280,7 +284,7 @@ async def test_issue_tree_enter_adds_child_and_shift_enter_sibling(tmp_path):
         app.open_session(session)
         await pilot.pause()
         assert isinstance(app.screen, Workspace)
-        editor = app.screen.query_one("#entry", Input)
+        editor = app.screen.query_one("#entry", TextField)
         editor.value = "Root"
         editor.focus()
         await pilot.press("enter")
@@ -311,13 +315,13 @@ async def test_blank_form_example_opt_in_and_resume(tmp_path):
         app.screen.query_one("#group-0-add", Button).press()
         await pilot.pause()
         label = next(ident for ident, (path, _) in app.screen.fields.items() if path == ("nodes", 0, "label"))
-        app.screen.query_one(f"#{label}", Input).value = "Customer value"
+        app.screen.query_one(f"#{label}", TextField).value = "Customer value"
         await pilot.pause()
         assert session.method_state["nodes"][0]["id"] == "customer-value"
         app.open_session(store.load(session.id), guided=True)
         await pilot.pause()
         assert next(ident for ident, (path, _) in app.screen.fields.items() if path == ("nodes", 0, "label"))
-        assert app.screen.query_one(f"#{label}", Input).value == "Customer value"
+        assert app.screen.query_one(f"#{label}", TextField).value == "Customer value"
         app.screen.query_one("#load-example", Button).press()
         await pilot.pause()
         assert app.session.method_state["nodes"][0]["label"] == "Customer value"
@@ -327,6 +331,90 @@ async def test_blank_form_example_opt_in_and_resume(tmp_path):
         await pilot.press("f6")
         assert isinstance(app.screen, Workspace)
         assert app.screen.query_one("#structured-input")
+
+
+@pytest.mark.asyncio
+async def test_objectives_form_purpose_and_disconfirmation_are_separate_from_parent(tmp_path):
+    store = Store(tmp_path / "objectives.db")
+    session = Session(store.new_project("Forsyth"), "objectives", "Pilot Outcomes")
+    store.save(session)
+    app = ThinkApp(store=store)
+    purpose = "Assess whether the pilot lineage meets Forsyth's needs and whether to expand onboarding."
+    disconfirm = "Forsyth cannot trace a pilot record to its origin."
+    async with app.run_test() as pilot:
+        app.open_session(session, guided=True)
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, FormScreen)
+        assert screen.query_one("#analysis-objective", TextField).value == ""
+        screen.query_one("#analysis-objective", TextField).value = purpose
+        screen.query_one("#form-change-mind", TextField).value = disconfirm
+        await pilot.pause()
+        await pilot.press("ctrl+s")  # an incomplete hierarchy still saves the draft
+        saved = store.load(session.id)
+        assert saved.objective == purpose
+        assert saved.method_state == {"change_mind": disconfirm}
+        assert saved.completed_at is None
+
+        screen.query_one("#group-0-add", Button).press()
+        await pilot.pause()
+        observation = next(i for i, (path, _) in screen.fields.items() if path == ("nodes", 0, "change_mind"))
+        screen.query_one(f"#{observation}", TextField).value = "A cheaper way meets the same need"
+        label = next(i for i, (path, _) in screen.fields.items() if path == ("nodes", 0, "label"))
+        kind = next(i for i, (path, _) in screen.fields.items() if path == ("nodes", 0, "kind"))
+        parent = next(i for i, (path, _) in screen.fields.items() if path == ("nodes", 0, "parent_id"))
+        assert screen.query_one(f"#{parent}", Select).value == ""  # root has no parent
+        screen.query_one(f"#{label}", TextField).value = "Reliable lineage"
+        screen.query_one(f"#{kind}", Select).value = "fundamental"
+        await pilot.pause()
+        screen.query_one("#group-0-add", Button).press()
+        await pilot.pause()
+        child_label = next(i for i, (path, _) in screen.fields.items() if path == ("nodes", 1, "label"))
+        child_kind = next(i for i, (path, _) in screen.fields.items() if path == ("nodes", 1, "kind"))
+        child_parent = next(i for i, (path, _) in screen.fields.items() if path == ("nodes", 1, "parent_id"))
+        child_observation = next(i for i, (path, _) in screen.fields.items() if path == ("nodes", 1, "change_mind"))
+        screen.query_one(f"#{child_observation}", TextField).value = "Tracing proves unnecessary"
+        screen.query_one(f"#{child_label}", TextField).value = "Traceability"
+        screen.query_one(f"#{child_kind}", Select).value = "means"
+        screen.query_one(f"#{child_parent}", Select).value = "reliable-lineage"
+        await pilot.pause()
+        await pilot.press("ctrl+s")
+        saved = store.load(session.id)
+        assert saved.completed_at is not None
+        assert saved.method_state["nodes"][0]["parent_id"] is None
+        assert saved.method_state["nodes"][1]["parent_id"] == "reliable-lineage"
+        assert saved.method_state["nodes"][0]["change_mind"] == "A cheaper way meets the same need"
+        hierarchy = METHODS["objectives"].calculate(saved.method_state)["hierarchy"]
+        assert hierarchy[0]["change_mind"] == "A cheaper way meets the same need"
+        assert hierarchy[0]["children"][0]["change_mind"] == "Tracing proves unnecessary"
+        assert saved.objective == purpose
+
+        app.open_session(store.load(session.id), guided=True)
+        await pilot.pause()
+        assert app.screen.query_one("#analysis-objective", TextField).value == purpose
+        assert app.screen.query_one("#form-change-mind", TextField).value == disconfirm
+        observation = next(i for i, (path, _) in app.screen.fields.items() if path == ("nodes", 0, "change_mind"))
+        assert app.screen.query_one(f"#{observation}", TextField).value == "A cheaper way meets the same need"
+        app.screen.query_one(f"#{observation}", TextField).value = ""
+        await pilot.pause()
+        assert (
+            METHODS["objectives"].calculate(store.load(session.id).method_state)["hierarchy"][0]["children"][0][
+                "change_mind"
+            ]
+            == "Tracing proves unnecessary"
+        )
+        snapshot = store.snapshot(session.project_id)
+        restored = Store(tmp_path / "restored.db")
+        imported_project = restored.import_snapshot(snapshot)
+        assert restored.sessions(imported_project)[0].method_state["nodes"][1]["change_mind"] == (
+            "Tracing proves unnecessary"
+        )
+        markdown = tmp_path / "pilot.md"
+        app.screen.query_one("#form-export-path", Input).value = str(markdown)
+        app.screen.action_export()
+        assert "## Objective\n\n" + purpose in markdown.read_text()
+        assert "## What would change our mind?\n\n" + disconfirm in markdown.read_text()
+        assert "Tracing proves unnecessary" in markdown.read_text()
 
 
 @pytest.mark.asyncio

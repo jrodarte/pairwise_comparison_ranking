@@ -5,13 +5,16 @@ from __future__ import annotations
 from textual.app import ComposeResult
 from textual.containers import VerticalScroll
 from textual.screen import Screen
-from textual.widgets import Button, DataTable, Footer, Header, Input, Label, Select, Static
+from textual.widgets import Button, Footer, Header
 
+from .coach import CoachHost
 from .core import METHODS, Session
 from .planning import GOALS, begin_workflow, continue_workflow, planned_next, recommend, transfer
+from .safe_widgets import DataTable, Label, Select, Static
+from .text_field import TextField
 
 
-class PlanningScreen(Screen):
+class PlanningScreen(CoachHost, Screen):
     BINDINGS = [("escape", "back", "Back")]
 
     def __init__(self, source: Session | None = None) -> None:
@@ -44,7 +47,7 @@ class PlanningScreen(Screen):
                     classes="muted",
                 )
                 yield Select([(goal, goal) for goal in GOALS], value=next(iter(GOALS)), id="goal", allow_blank=False)
-                yield Input(
+                yield TextField(
                     placeholder="Problem statement for a linked workflow (no example data)", id="workflow-problem"
                 )
                 yield Button("Start linked, step-by-step workflow", id="workflow")
@@ -98,7 +101,7 @@ class PlanningScreen(Screen):
             session = begin_workflow(
                 app.project_id,
                 str(self.query_one("#goal", Select).value),
-                self.query_one("#workflow-problem", Input).value,
+                self.query_one("#workflow-problem", TextField).value,
             )
         except ValueError as exc:
             self.notify(str(exc), severity="error")

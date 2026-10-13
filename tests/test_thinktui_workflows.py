@@ -9,6 +9,7 @@ from thinktui.issue_tree import add, delete, nested, toggle, visible
 from thinktui.reports import decision_brief, export
 from thinktui.screens import History, Workspace
 from thinktui.storage import Store
+from thinktui.text_field import TextField
 
 
 def test_tree_hierarchy_validation_and_legacy():
@@ -48,7 +49,7 @@ async def test_tree_keyboard_resume_and_export(tmp_path):
         await pilot.pause()
         screen = app.screen
         assert isinstance(screen, Workspace)
-        editor = screen.query_one("#entry", Input)
+        editor = screen.query_one("#entry", TextField)
         editor.value = "Awareness"
         screen.tree_action("root")
         editor.value = "Documentation"
@@ -163,8 +164,8 @@ async def test_assumptions_impact_visible_and_saved_in_narrow_terminal(tmp_path)
         confidence = screen.query_one("#confidence", Input)
         assert impact.region.y > confidence.region.y
         assert impact.region.x + impact.region.width <= app.size.width
-        assert any("Impact (1–10)" in str(label.render()) for label in screen.query(Label))
-        screen.query_one("#entry", Input).value = "Capacity holds"
+        assert any("Impact if wrong (1–10)" in str(label.render()) for label in screen.query(Label))
+        screen.query_one("#entry", TextField).value = "Capacity holds"
         confidence.value = "25"
         impact.value = "9"
         assert screen.add_entry()

@@ -54,7 +54,20 @@ def set_key(provider_id: str, key: str, remember: bool = True) -> str:
             _session_keys.pop(provider_id, None)
             return "keyring"
         except Exception:
-            pass
+            # The old keyring entry may otherwise become active again on restart.
+            # Keep the new key in memory, remove the stale entry, or warn loudly if
+            # the backend cannot confirm that removal. Never echo either key.
+            _session_keys[provider_id] = key
+            try:
+                stale = backend.get_password(SERVICE, provider_id)
+                if stale:
+                    backend.delete_password(SERVICE, provider_id)
+            except Exception:
+                raise RuntimeError(
+                    "Could not replace or remove the old OS keyring key. Remove it in your credential manager "
+                    "before restarting; the new key is available for this session only."
+                ) from None
+            return "session"
     _session_keys[provider_id] = key
     return "session"
 
@@ -64,6 +77,7 @@ def forget_key(provider_id: str) -> None:
     backend = _backend()
     if backend is not None:
         try:
-            backend.delete_password(SERVICE, provider_id)
+            if backend.get_password(SERVICE, provider_id):
+                backend.delete_password(SERVICE, provider_id)
         except Exception:
-            pass
+            raise RuntimeError("Could not remove the OS keyring key; remove it in your credential manager") from None

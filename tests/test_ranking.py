@@ -34,6 +34,7 @@ def test_ties_and_cycle_are_finite():
     ties = [Comparison(a.id, b.id, Outcome.TIE, 1)]
     rows = BradleyTerry().calculate(items, ties)
     assert rows[0].score == 50
+    assert [row.rank for row in rows] == [1, 1, 1]
     tied = next(row for row in rows if row.item.id == a.id)
     assert (tied.ties, tied.points, tied.win_percentage, tied.total) == (1, 0.5, 50, 1)
 
@@ -44,4 +45,6 @@ def test_unplayed_and_perfect_separation():
     rows = BradleyTerry().calculate(items, matches)
     assert rows[0].item.id == items[0].id
     assert all(math.isfinite(row.score) for row in rows)
-    assert all(row.score == 50 for row in BradleyTerry().calculate(items, []))
+    unplayed = BradleyTerry().calculate(items, [])
+    assert all(row.score == 50 for row in unplayed)
+    assert all(row.rank == 1 for row in unplayed)

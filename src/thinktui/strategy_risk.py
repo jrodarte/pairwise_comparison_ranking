@@ -95,8 +95,8 @@ class Backcasting(StructuredMethod):
         "future_state": "Automated lineage",
         "target_date": "2028-12-31",
         "milestones": [
-            {"date": "2028-06-01", "requirement": "APIs live", "owner": "Platform"},
-            {"date": "2027-01-01", "requirement": "Pilot", "owner": "Team"},
+            {"date": "2028-06-01", "requirement": "APIs live", "owner": "Platform", "depends_on": "Pilot"},
+            {"date": "2027-01-01", "requirement": "Pilot", "owner": "Team", "depends_on": ""},
         ],
     }
 
@@ -149,8 +149,20 @@ class Objectives(StructuredMethod):
             raise ValueError("Each objective must have kind fundamental or means")
         if not any(node["kind"] == "fundamental" for node in nodes):
             raise ValueError("Identify at least one fundamental objective")
+        if any("change_mind" in node and not isinstance(node["change_mind"], str) for node in nodes):
+            raise ValueError("Each change-of-mind observation must be text")
+        hierarchy = nested(state)
+        observations = {node["id"]: node.get("change_mind") for node in nodes}
+
+        def include_observations(branches: list[dict]) -> None:
+            for branch in branches:
+                if observations[branch["id"]]:
+                    branch["change_mind"] = observations[branch["id"]]
+                include_observations(branch["children"])
+
+        include_observations(hierarchy)
         return {
-            "hierarchy": nested(state),
+            "hierarchy": hierarchy,
             "kinds": {node["id"]: node["kind"] for node in nodes},
             "note": "Means are not automatically criteria; user determines what matters.",
         }

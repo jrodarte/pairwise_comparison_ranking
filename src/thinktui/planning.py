@@ -40,6 +40,7 @@ def planned_next(source: Session) -> str | None:
         or not isinstance(steps, list)
         or not 0 <= index < len(steps)
         or steps[index] != source.method_id
+        or any(not isinstance(step, str) or step not in METHODS for step in steps)
     ):
         return None
     return steps[index + 1] if index + 1 < len(steps) else None

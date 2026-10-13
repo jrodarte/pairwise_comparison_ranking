@@ -17,11 +17,11 @@ from .ai import (
     context_for,
     describe,
     public_error,
-    remote_consent,
     selected_provider,
     sharing_destination,
     visible_text,
 )
+from .ai_setup import AISetupRequired, prompt_ai_setup, prompt_missing_key, require_ai_setup
 from .core import Session
 
 _NUMBER = r"[-+]?\d+(?:\.\d+)?"
@@ -42,9 +42,39 @@ NUMERIC_JUDGMENT = re.compile(
 )
 
 
+_NUMERIC_WORDS = re.compile(
+    r"\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
+    r"hundred|thousand|million|percent|half|quarter)\b|[\d\u00bc-\u00be\u2150-\u2189]",
+    re.IGNORECASE,
+)
+
+
+_PROVENANCE_FIELDS = {
+    "evidence",
+    "source",
+    "sources",
+    "provenance",
+    "observations",
+    "cases",
+    "supporting",
+    "contradicting",
+}
+
+
+def can_draft_path(method_id: str, path: tuple[object, ...]) -> bool:
+    """Evidence and source claims must originate with the user, not with AI."""
+    return not any(str(part).casefold() in _PROVENANCE_FIELDS for part in path)
+
+
 def text_only(answer: str) -> str:
-    """Omit numeric judgments, not harmless prose such as 'Phase 2'."""
-    return "\n".join(line for line in answer.splitlines() if not NUMERIC_JUDGMENT.search(line)).strip()
+    """Discard whole AI lines that could supply quantitative judgments."""
+
+    def safe_line(line: str) -> bool:
+        # Phase names and quarter labels are identifiers, not quantitative ratings.
+        without_identifiers = re.sub(r"\b(?:Phase\s+\d+|Q[1-4])\b", "", line, flags=re.IGNORECASE)
+        return not _NUMERIC_WORDS.search(without_identifiers)
+
+    return "\n".join(line for line in answer.splitlines() if safe_line(line)).strip()
 
 
 async def stream_text_draft(
@@ -59,10 +89,7 @@ async def stream_text_draft(
     if selected_provider(store) == "off":
         raise ValueError("AI is off. Enter your own text instead.")
     provider, config = await (connect_fn or connect)(store)
-    if not remote_consent(store, config):
-        raise ValueError(
-            f"Review remote AI consent for {config.preset.label} in Settings before sharing this analysis."
-        )
+    await require_ai_setup(store, provider, config)
     if on_start:
         on_start(
             f"{sharing_destination(config)} · Sharing: method, problem, objective, assumptions, full method state (not notes or history)"
@@ -128,12 +155,20 @@ class FieldHelpMixin:
             self.query_one("#field-help-status", Static).update(
                 f"{self._field_help_destination}\n{provider} · edit, Accept or Dismiss. Not saved."
             )
+        except AISetupRequired as exc:
+            self.query_one("#field-help-status", Static).update("AI request not sent. Complete setup in Settings.")
+            prompt_ai_setup(self.app, exc)
         except ValueError as exc:
             self.query_one("#field-help-status", Static).update(str(exc))
-        except (RuntimeError, KeyError) as exc:
-            self.query_one("#field-help-status", Static).update(
-                f"AI unavailable: {public_error(exc)}. Your analysis is preserved."
-            )
+        except Exception as exc:
+            if prompt_missing_key(self.app, exc):
+                self.query_one("#field-help-status", Static).update(
+                    "API key needed or rejected. No draft was accepted."
+                )
+            else:
+                self.query_one("#field-help-status", Static).update(
+                    f"AI unavailable: {public_error(exc)}. Your analysis is preserved."
+                )
 
     def field_help_session(self) -> Session:
         raise NotImplementedError
@@ -147,6 +182,9 @@ class FieldHelpMixin:
         ):
             return
         text = self.query_one("#field-help-preview", TextArea).text.strip()
+        if text_only(text) != text:
+            self.query_one("#field-help-status", Static).update("Remove numeric judgments before accepting AI text.")
+            return
         if not text:
             self.query_one("#field-help-status", Static).update("Enter text before accepting.")
             return

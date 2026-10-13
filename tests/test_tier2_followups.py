@@ -16,6 +16,7 @@ from thinktui.form_screen import FormScreen
 from thinktui.guided_screen import GuidedScreen
 from thinktui.screens import AnalysisDialog, MoveAnalysisDialog, ProjectView, Workspace
 from thinktui.storage import Store
+from thinktui.text_field import TextField
 
 
 @pytest.mark.parametrize(
@@ -47,7 +48,7 @@ def test_ai_generated_numeric_judgment_is_removed(judgment):
 
 
 @pytest.mark.asyncio
-async def test_form_ai_stream_filters_numeric_prose_but_accepts_user_edited_text(tmp_path, monkeypatch):
+async def test_form_ai_stream_filters_numeric_prose_and_rejects_numeric_accept(tmp_path, monkeypatch):
     store = Store(tmp_path / "form.db")
     store.set_setting("ai_provider", "ollama")
     session = Session(store.new_project("Study"), "backcasting", "Future")
@@ -75,12 +76,12 @@ async def test_form_ai_stream_filters_numeric_prose_but_accepts_user_edited_text
         screen.query_one("#form-preview", TextArea).load_text("8/10 risk — my own wording")
         screen.accept()
         await pilot.pause()
-        assert store.load(session.id).method_state["future_state"] == "8/10 risk — my own wording"
+        assert store.load(session.id).method_state == {}
     store.close()
 
 
 @pytest.mark.asyncio
-async def test_guided_draft_filters_numeric_prose_and_preserves_user_edits(tmp_path, monkeypatch):
+async def test_guided_draft_filters_numeric_prose_and_rejects_numeric_accept(tmp_path, monkeypatch):
     store = Store(tmp_path / "guided.db")
     store.set_setting("ai_provider", "ollama")
     session = Session(store.new_project("Study"), "matrix", "Options")
@@ -107,7 +108,7 @@ async def test_guided_draft_filters_numeric_prose_and_preserves_user_edits(tmp_p
         screen.query_one("#field-help-preview", TextArea).load_text("Rating is 4 out of 5 — my own wording")
         screen.query_one("#help-accept", Button).press()
         await pilot.pause()
-        assert screen.query_one("#field-alternatives", TextArea).text == "Rating is 4 out of 5 — my own wording"
+        assert screen.query_one("#field-alternatives", TextArea).text == ""
         assert store.load(session.id).method_state == {}
     store.close()
 
@@ -133,7 +134,7 @@ async def test_assumption_suggestion_and_challenge_filter_numeric_prose(tmp_path
         screen.query_one("#suggest", Button).press()
         await pilot.pause()
         await screen.workers.wait_for_complete()
-        assert screen.query_one("#suggestion", Input).value == "Phase 2", str(
+        assert screen.query_one("#suggestion", TextField).value == "Phase 2", str(
             screen.query_one("#ai-response", Static).content
         )
         assert store.load(session.id).method_state == {}

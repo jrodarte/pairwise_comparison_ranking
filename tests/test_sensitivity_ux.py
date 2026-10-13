@@ -305,3 +305,30 @@ async def test_blank_sensitivity_form_does_not_invent_range_bounds(tmp_path):
         screen.action_save()
         assert not store.load(session.id).completed_at
         assert "Please review" in str(screen.query_one("#form-error", Static).content)
+
+
+@pytest.mark.asyncio
+async def test_long_sensitivity_form_scrolls_to_its_last_field(tmp_path):
+    store = Store(tmp_path / "scroll.db")
+    criteria = [{"name": f"C{i}", "weight": 1, "direction": "benefit"} for i in range(5)]
+    state = {
+        "criteria": criteria,
+        "alternatives": [{"name": "A", "scores": [5] * 5}, {"name": "B", "scores": [4] * 5}],
+        "vary": "C0",
+        "range": [0, 1],
+    }
+    session = Session(store.new_project("Scroll"), "sensitivity", "Long form", method_state=state)
+    store.save(session)
+    app = ThinkApp(store=store)
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.open_session(session, guided=True)
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, FormScreen)
+        pane = screen.query_one(".editor-pane")
+        assert pane.max_scroll_y > 0
+        export = screen.query_one("#form-export-path", Input)
+        export.focus()
+        await pilot.pause()
+        assert pane.scroll_y > 0
+        assert export.region.height > 0

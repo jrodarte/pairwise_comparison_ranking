@@ -127,24 +127,35 @@ class CausalLoop(StructuredMethod):
                 raise ValueError("Duplicate signed link")
             graph[source].append((target, row["polarity"]))
         cycles = []
+        visits = 0
+        budget = 100_000  # deterministic work cap; avoid blocking Textual on dense graphs
+        truncated = False
         for start in sorted(variables):
+            if truncated:
+                break
 
             def walk(node: str, path: list[str], sign: int, origin: str = start) -> None:
-                if len(cycles) >= 100 or len(path) > 12:
+                nonlocal visits, truncated
+                if truncated or len(path) > 12:
                     return
                 for target, polarity in graph[node]:
+                    visits += 1
+                    if visits > budget or len(cycles) >= 100:
+                        truncated = True
+                        return
                     if target == origin and len(path) >= 2:
-                        # Only traverse cycles from their lexicographically smallest node.
-                        if origin == min(path):
-                            cycles.append(
-                                {"path": [*path, origin], "type": "reinforcing" if sign * polarity > 0 else "balancing"}
-                            )
-                    elif target not in path:
+                        cycles.append(
+                            {"path": [*path, origin], "type": "reinforcing" if sign * polarity > 0 else "balancing"}
+                        )
+                    elif target > origin and target not in path:
                         walk(target, [*path, target], sign * polarity)
+                    if truncated:
+                        return
 
             walk(start, [start], 1)
         return {
             "loops": cycles,
+            "truncated": truncated,
             "variables": variables,
             "note": "Polarity is qualitative; loops do not predict stock trajectories. Max 100 loops/12 links reported.",
         }

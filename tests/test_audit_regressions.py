@@ -92,11 +92,14 @@ def test_snapshot_invalid_types_are_atomic_and_legacy_completion_migrates(tmp_pa
             (session.id, event_at, "Completed Issue Tree", "[]"),
         )
         store.db.execute("DROP TABLE project_events")
+        store.db.execute("DROP TRIGGER events_no_update")
+        store.db.execute("DROP TRIGGER events_no_delete")
+        store.db.execute("DROP TABLE event_delete_permissions")
         store.db.execute("PRAGMA user_version=3")
     store.close()
     store = Store(path)
     assert store.load(session.id).completed_at == event_at
-    assert store.db.execute("PRAGMA user_version").fetchone()[0] == 5
+    assert store.db.execute("PRAGMA user_version").fetchone()[0] == 7
     snapshot = store.snapshot(project)
     before = [
         store.db.execute(f"SELECT count(*) FROM {table}").fetchone()[0] for table in ("projects", "sessions", "events")

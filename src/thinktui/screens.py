@@ -18,13 +18,9 @@ from textual.screen import ModalScreen, Screen
 from textual.widgets import (
     Button,
     Checkbox,
-    DataTable,
     Footer,
     Header,
     Input,
-    Label,
-    Select,
-    Static,
     TextArea,
 )
 
@@ -34,6 +30,7 @@ from pairwise_prioritizer.models import Item, Outcome, Project
 from . import credentials
 from .ai import (
     AUTO_NOTE,
+    EFFORT_PROVIDERS,
     PRESETS,
     AIRequest,
     ProviderConfig,
@@ -43,18 +40,21 @@ from .ai import (
     context_for,
     create,
     describe,
+    effort_levels,
     key_status,
     parse_json_object,
     pick_ollama_model,
     public_error,
-    remote_consent,
     selected_provider,
     sharing_destination,
     status_label,
     visible_text,
 )
+from .ai_setup import AISetupRequired, prompt_ai_setup, prompt_missing_key, require_ai_setup
+from .coach import CoachHost
 from .context_offers import offers
-from .core import METHODS, Session, timestamp
+from .core import ASSUMPTION_STATUSES, METHODS, Session, assumption_status_label, timestamp
+from .explain import ExplainDialog
 from .field_ai import FieldHelpMixin, text_only
 from .guided_workflow import GUIDED
 from .issue_tree import add as tree_add
@@ -62,10 +62,15 @@ from .issue_tree import delete as tree_delete
 from .issue_tree import edit as tree_edit
 from .issue_tree import toggle as tree_toggle
 from .issue_tree import visible as tree_visible
+from .path_picker import ExportPicker, suggested_filename, user_path
 from .planning import planned_next, sensitivity_from_matrix, sensitivity_pair
 from .planning_screen import PlanningScreen
 from .project_progress import checklist
 from .reports import export
+from .safe_widgets import DataTable, Label, Select, Static
+from .text_field import TextField
+from .themes import THEME_CHOICES
+from .workspace_layout import WorkspaceLayout
 
 
 class AIStatus(Static):
@@ -119,7 +124,7 @@ class AIStatus(Static):
         self.update(f"{message} · {self.elapsed:.0f}s" if self.started else message)
 
 
-class Base(Screen):
+class Base(CoachHost, Screen):
     def chrome(self) -> ComposeResult:
         yield Header()
         yield Footer()
@@ -171,7 +176,11 @@ class HelpDialog(ModalScreen[None]):
                 "Tab / Shift+Tab: move focus. Enter: activate selected button or row.\n"
                 "Ctrl+O: Home · Ctrl+P: Methods · Ctrl+N: New project · Esc: go back.\n"
                 "Project: F2 rename analysis · Del delete analysis · Ctrl+D duplicate · Ctrl+M move.\n"
-                "Forms: Ctrl+S calculate / finish · F6 Advanced JSON · Ctrl+E export.\n"
+                "Forms: Ctrl+S calculate / finish · F6 Advanced JSON · Ctrl+E export · F9 explain results with AI.\n"
+                "F10: show or hide the AI co-planner (P on Home starts a guided walkthrough).\n"
+                "Analysis panes: Ctrl+1 editor · Ctrl+2 AI (toggle hide/show) · Ctrl+0 both.\n"
+                "Vim-like navigation outside text fields: J/K next/previous focus or list row; "
+                "H/L editor/AI pane (or table column). Tab/Shift+Tab always work.\n"
                 "Guided: F7 previous · F8 or Ctrl+S validate/next · F6 Advanced JSON.\n"
                 "Pairwise only: A/D choose, T tie, S skip, U undo.\n"
                 "Issue tree: A child · S sibling · F fold focused branch · D asks before subtree deletion.\n"
@@ -334,6 +343,7 @@ class Home(Base):
         ("s", "settings", "Settings"),
         ("j", "journal", "Journal"),
         ("h", "choose", "Help me choose"),
+        ("p", "coplan", "AI co-planner"),
         ("d", "delete", "Delete selected"),
     ]
 
@@ -348,6 +358,11 @@ class Home(Base):
                 yield Button("Settings  S", id="settings")
                 yield Button("Decision journal  J", id="journal")
                 yield Button("Help me choose  H", id="choose")
+            with Horizontal(classes="actions"):
+                yield Button("Plan with AI co-planner  P", id="coplan")
+                yield Static(
+                    "A step-by-step teacher that stays beside every screen (F10 shows or hides it).", classes="muted"
+                )
             yield Static("", id="review-due", classes="muted")
             yield Label("Recent work", classes="heading")
             yield Static(
@@ -405,15 +420,27 @@ class Home(Base):
     def action_choose(self) -> None:
         self.workbench.switch_screen(PlanningScreen())
 
+    def action_coplan(self) -> None:
+        self.workbench.start_coach()
+
     def action_import_snapshot(self) -> None:
-        path = Path(self.query_one("#import-path", Input).value).expanduser()
+        try:
+            path = user_path(self.query_one("#import-path", Input).value)
+        except ValueError as exc:
+            self.notify(str(exc), severity="error")
+            return
         if path.suffix.lower() != ".json":
             self.notify("Choose a .json snapshot file", severity="warning")
             return
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            if path.stat().st_size > 10_000_000:
+                raise ValueError("Snapshot exceeds the 10 MB import limit")
+            data = json.loads(
+                path.read_text(encoding="utf-8"),
+                parse_constant=lambda _: (_ for _ in ()).throw(ValueError("Non-finite JSON number")),
+            )
             self.workbench.project_id = self.workbench.store.import_snapshot(data)
-        except (OSError, ValueError, TypeError, KeyError, sqlite3.Error) as exc:
+        except (OSError, ValueError, TypeError, KeyError, sqlite3.Error, RecursionError) as exc:
             self.notify(f"Could not import snapshot: {exc}", severity="error")
             return
         self.workbench.show_project()
@@ -451,6 +478,11 @@ class NewProject(Base):
             self.workbench.project_id = self.workbench.store.new_project(self.query_one(Input).value)
         except ValueError as exc:
             self.notify(str(exc), severity="error")
+            return
+        except sqlite3.Error:
+            self.notify(
+                "Could not create project: database is read-only or busy. Your name is still here.", severity="error"
+            )
             return
         if self.workbench.pending_method_id:
             self.workbench.method_id = self.workbench.pending_method_id
@@ -546,8 +578,11 @@ class ProjectView(Base):
         editor = self.query("#project-question")
         value = editor.first().value if editor else self.question_value
         project_id = self.workbench.project_id
-        if value.strip() != self.workbench.store.project(project_id)["planning_question"]:
-            self.workbench.store.set_planning_question(project_id, value)
+        try:
+            if value.strip() != self.workbench.store.project(project_id)["planning_question"]:
+                self.workbench.store.set_planning_question(project_id, value)
+        except sqlite3.Error:
+            self.notify("Could not save the project question. Check database access before exiting.", severity="error")
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "project-question":
@@ -615,6 +650,9 @@ class ProjectView(Base):
                 except ValueError as exc:
                     self.notify(str(exc), severity="warning")
                     return False
+                except sqlite3.Error:
+                    self.notify("Could not rename analysis; check database access.", severity="error")
+                    return False
                 return True
 
             def finish(value: str | None) -> None:
@@ -629,7 +667,11 @@ class ProjectView(Base):
 
             def finish(value: str | None) -> None:
                 if value == "DELETE":
-                    self.workbench.store.delete_session(session.id)
+                    try:
+                        self.workbench.store.delete_session(session.id)
+                    except (sqlite3.Error, KeyError):
+                        self.notify("Could not delete analysis; no changes were committed.", severity="error")
+                        return
                     if self.workbench.session and self.workbench.session.id == session.id:
                         self.workbench.session = None
                     self.workbench.show_project()
@@ -639,7 +681,11 @@ class ProjectView(Base):
     def action_duplicate_analysis(self) -> None:
         session = self.selected_analysis()
         if session:
-            self.workbench.store.duplicate_session(session.id)
+            try:
+                self.workbench.store.duplicate_session(session.id)
+            except (sqlite3.Error, ValueError):
+                self.notify("Could not duplicate analysis; check database access.", severity="error")
+                return
             self.workbench.show_project()
 
     def action_move_analysis(self) -> None:
@@ -659,6 +705,9 @@ class ProjectView(Base):
             except ValueError as exc:
                 self.notify(str(exc), severity="warning")
                 return False
+            except sqlite3.Error:
+                self.notify("Could not move analysis; check database access.", severity="error")
+                return False
             return True
 
         def finish(project_id: str | None) -> None:
@@ -672,7 +721,11 @@ class ProjectView(Base):
 
         def finish(value: str | None) -> None:
             if value:
-                self.workbench.store.rename_project(project_id, value)
+                try:
+                    self.workbench.store.rename_project(project_id, value)
+                except (sqlite3.Error, ValueError):
+                    self.notify("Could not rename project; check database access.", severity="error")
+                    return
                 self.workbench.show_project()
 
         self.workbench.push_screen(AnalysisDialog(self.workbench.store.project(project_id)["name"]), finish)
@@ -682,13 +735,17 @@ class ProjectView(Base):
             confirm_project_deletion(self, self.workbench.project_id)
 
     def action_export_snapshot(self) -> None:
-        path = Path(self.query_one("#snapshot-path", Input).value).expanduser()
+        try:
+            path = user_path(self.query_one("#snapshot-path", Input).value)
+        except ValueError as exc:
+            self.notify(str(exc), severity="error")
+            return
         if path.suffix.lower() != ".json":
             self.notify("Choose a .json filename", severity="warning")
             return
         try:
             data = self.workbench.store.snapshot(self.workbench.project_id)
-            content = json.dumps(data, indent=2, ensure_ascii=False)
+            content = json.dumps(data, indent=2, ensure_ascii=False, allow_nan=False)
             with path.open("x", encoding="utf-8") as stream:
                 stream.write(content)
         except (OSError, ValueError, KeyError) as exc:
@@ -876,13 +933,13 @@ class NewAnalysis(Base):
         with VerticalScroll(classes="page"):
             yield Label("Start " + METHODS[self.workbench.method_id].name, classes="hero")
             yield Input(placeholder="Analysis title", id="title")
-            yield Input(placeholder="What are you trying to understand or decide?", id="problem")
-            yield Input(placeholder="Objective (optional)", id="objective")
+            yield TextField(placeholder="What are you trying to understand or decide?", id="problem")
+            yield TextField(placeholder="Objective (optional)", id="objective")
             yield Button("Start", id="start", variant="primary")
 
     def on_mount(self) -> None:
         if self.workbench.project_id:
-            self.query_one("#problem", Input).value = self.workbench.store.project(self.workbench.project_id)[
+            self.query_one("#problem", TextField).value = self.workbench.store.project(self.workbench.project_id)[
                 "planning_question"
             ]
         self.query_one("#title", Input).focus()
@@ -899,18 +956,83 @@ class NewAnalysis(Base):
             project_id=self.workbench.project_id,
             method_id=self.workbench.method_id,
             title=title,
-            problem_statement=self.query_one("#problem", Input).value,
-            objective=self.query_one("#objective", Input).value,
+            problem_statement=self.query_one("#problem", TextField).value,
+            objective=self.query_one("#objective", TextField).value,
         )
         existing = {s.title.casefold() for s in self.workbench.store.sessions(self.workbench.project_id)}
         if title.casefold() in existing:
             self.notify("An analysis already has this title; choose a distinct title", severity="warning")
             return
-        self.workbench.store.save(session, "Created analysis")
+        try:
+            self.workbench.store.save(session, "Created analysis")
+        except (sqlite3.Error, ValueError):
+            self.notify(
+                "Could not create analysis; database is read-only or busy. Your draft remains here.", severity="error"
+            )
+            return
         self.workbench.open_session(session, guided=True)
 
     def action_back(self) -> None:
         self.workbench.switch_screen(Library())
+
+
+# Short, structured journal values stay one-line inputs; prose fields wrap and grow.
+JOURNAL_SHORT_FIELDS = {"decision_date", "confidence", "review_date"}
+
+
+def journal_field(session: Session, field: str, hint: str) -> Input | TextField:
+    value = str(session.method_state.get(field, ""))
+    if field in JOURNAL_SHORT_FIELDS:
+        return Input(value=value, placeholder=hint, id=f"journal-{field}")
+    return TextField(value, placeholder=hint, id=f"journal-{field}")
+
+
+# Ranked-entry editors (Key Assumptions Check, Premortem). Each optional text field is
+# (key, label, why). Ratings are separate inputs and always user-supplied.
+ENTRY_NOUN = {"assumptions": "assumption", "premortem": "failure mode"}
+ENTRY_TEXT_FIELDS: dict[str, tuple[tuple[str, str, str], ...]] = {
+    "assumptions": (
+        (
+            "basis",
+            "Why do you believe it? (optional)",
+            "Current basis or evidence. Why: separates an assumption from a known fact.",
+        ),
+        (
+            "action",
+            "Validation test (optional)",
+            "How you will check it. Why: a high-risk assumption needs a test before you rely on it.",
+        ),
+        (
+            "change_mind",
+            "Disproved if… (optional)",
+            "The test result that would show this assumption is wrong. Why: deciding it before you test "
+            "keeps the result honest.",
+        ),
+    ),
+    "premortem": (
+        (
+            "category",
+            "Cause cluster (optional)",
+            "Group similar causes, e.g. People, Technology, Market. Why: clusters reveal shared root causes.",
+        ),
+        (
+            "action",
+            "Preventive action (optional)",
+            "What you will do now to prevent or soften it. Why: a useful risk needs a response.",
+        ),
+        ("owner", "Owner (optional)", "Who acts on the prevention. Why: unowned actions rarely happen."),
+        (
+            "warning_sign",
+            "Early warning sign (optional)",
+            "What you would see if this failure were starting. Why: lets you react before it is too late.",
+        ),
+    ),
+}
+
+
+def entry_input_id(key: str) -> str:
+    # "action" keeps its historical id so saved tests, docs and AI drafts still target it.
+    return "action" if key == "action" else f"entry-{key}"
 
 
 class Workspace(FieldHelpMixin, Base):
@@ -922,6 +1044,10 @@ class Workspace(FieldHelpMixin, Base):
             return method == "pairwise"
         if action in {"tree_toggle", "tree_sibling"}:
             return method == "issue_tree"
+        if action == "new_entry":
+            return method in ENTRY_NOUN
+        if action == "toggle_entry_row":
+            return method in ENTRY_NOUN and bool(self.query("#entry-list")) and self.query_one("#entry-list").has_focus
         return True
 
     BINDINGS = [
@@ -932,17 +1058,21 @@ class Workspace(FieldHelpMixin, Base):
         ("u", "undo", "Undo"),
         ("escape", "back", "Project"),
         ("ctrl+s", "save", "Save"),
+        Binding("f6", "form", "Form", priority=True),
         ("ctrl+k", "challenge", "Challenge"),
+        ("f9", "explain", "Explain results"),
         Binding("ctrl+g", "stop_ai", "Stop AI", priority=True),
         ("ctrl+e", "export", "Export"),
         Binding("f", "tree_toggle", "Fold tree", priority=False),
         Binding("shift+enter", "tree_sibling", "Add sibling", priority=True),
+        Binding("plus", "new_entry", "New entry"),
+        Binding("space", "toggle_entry_row", "Expand row"),
     ]
 
     def compose(self) -> ComposeResult:
         session = self.workbench.session
         yield from self.chrome()
-        with Horizontal(classes="workspace-layout"):
+        with WorkspaceLayout():
             with VerticalScroll(classes="editor-pane"):
                 yield Label(f"{session.title}  ·  {METHODS[session.method_id].name}", classes="hero")
                 yield Static(
@@ -955,7 +1085,7 @@ class Workspace(FieldHelpMixin, Base):
                         classes="muted",
                     )
                     if "ranking" not in session.method_state:
-                        yield TextArea(id="items")
+                        yield TextField(multiline=True, id="items")
                         yield Button("Start comparisons", id="initialize", variant="primary")
                         yield Static("", id="results")
                     else:
@@ -970,28 +1100,30 @@ class Workspace(FieldHelpMixin, Base):
                 else:
                     instructions = {
                         "matrix": 'Enter JSON: {"criteria":[{"name":"Value","weight":3,"direction":"benefit"}],"alternatives":[{"name":"A","scores":[8]},{"name":"B","scores":[6]}]}',
-                        "assumptions": "Add one assumption at a time. Rate confidence 0–100 and impact 1–10. What would falsify it?",
-                        "premortem": "Imagine it failed in 12 months. What went wrong? Add a cause and preventive action.",
+                        "assumptions": "List what your plan takes for granted, rate each one, then test the riskiest first.",
+                        "premortem": "Imagine it failed in 12 months. Record each cause, rate it, then choose prevention.",
                         "issue_tree": "Select a branch, type a label, Enter adds its child; Shift+Enter adds a sibling. A/S/D work on the tree; Edit changes a label; Tab folds.",
                         "journal": "Record your reasoning now; later compare the actual outcome without conflating decision quality and luck.",
                     }
                     if hasattr(METHODS[session.method_id], "example"):
                         yield Static(
-                            "Structured JSON worksheet: edit the example below with your own judgments/data; "
-                            "validate and save to calculate. Examples are NOT evidence and cannot be saved unchanged. "
+                            "Advanced JSON worksheet: enter your own judgments/data or press F6 for the form. "
+                            "Illustrative examples are NOT evidence and cannot be saved unchanged. "
                             + METHODS[session.method_id].description,
                             classes="muted",
                         )
-                        yield TextArea(id="structured-input")
+                        yield TextField(multiline=True, id="structured-input")
                         yield Button("Validate · Calculate · Save", id="structured-calculate", variant="primary")
-                        if session.method_id in GUIDED:
-                            yield Button("Guided steps", id="guided")
+                        yield Button(
+                            "Guided steps" if session.method_id in GUIDED else "Form view  F6",
+                            id="guided",
+                        )
                     else:
                         yield Static(instructions[session.method_id], classes="muted")
                     if hasattr(METHODS[session.method_id], "example"):
                         pass  # generic workflow above replaces the method-specific editor
                     elif session.method_id == "matrix":
-                        yield TextArea(id="matrix-input")
+                        yield TextField(multiline=True, id="matrix-input")
                         with Horizontal(classes="actions"):
                             yield Button("Calculate & save", id="calculate", variant="primary")
                             if (
@@ -1009,31 +1141,45 @@ class Workspace(FieldHelpMixin, Base):
                             yield Button("Test sensitivity of two options", id="sensitivity")
                             yield Button("Guided steps", id="guided")
                     elif session.method_id == "journal":
-                        fields = (
+                        # Spec §36 order: record the decision now; the last two fields wait for the review.
+                        now_fields = (
                             ("decision", "Decision to make"),
+                            ("decision_date", "Decision date YYYY-MM-DD (optional)"),
+                            ("context", "Context · what situation prompted this? (optional)"),
                             ("alternatives", "Alternatives considered"),
                             ("chosen", "Chosen option"),
                             ("expected_outcome", "Expected outcome"),
                             ("confidence", "Confidence 0–100 (optional)"),
-                            ("risks", "Risks and important assumptions"),
+                            ("assumptions", "Important assumptions (optional)"),
+                            ("risks", "Risks (optional)"),
                             ("review_date", "Review date YYYY-MM-DD"),
+                        )
+                        review_fields = (
                             ("actual_outcome", "Actual outcome (at review)"),
                             ("lessons", "Lessons learned (at review)"),
                         )
-                        for field, hint in fields:
+                        for field, hint in now_fields:
                             yield Label(hint, classes="heading")
-                            yield Input(
-                                value=str(session.method_state.get(field, "")), placeholder=hint, id=f"journal-{field}"
-                            )
+                            yield journal_field(session, field, hint)
                         yield Label("Rationale · Why this choice?", classes="heading")
-                        yield TextArea(str(session.method_state.get("rationale", "")), id="journal-rationale")
+                        yield TextField(
+                            str(session.method_state.get("rationale", "")), multiline=True, id="journal-rationale"
+                        )
+                        yield Label("At the review date", classes="heading")
+                        yield Static(
+                            "Fill these in later. Judge the decision by what was knowable then, not only by the outcome.",
+                            classes="muted",
+                        )
+                        for field, hint in review_fields:
+                            yield Label(hint, classes="heading")
+                            yield journal_field(session, field, hint)
                         yield Button("Save decision record", id="journal-save", variant="primary")
                     elif session.method_id == "issue_tree":
                         yield Static(
                             "Add a '?' at the end of a leaf question to offer it to Key Assumptions. Enter adds a child; S adds a sibling (Shift+Enter may not work in every terminal). F folds when the tree is focused; Tab moves focus.",
                             classes="muted",
                         )
-                        yield Input(placeholder="Branch label (select a row for child/sibling/edit)", id="entry")
+                        yield TextField(placeholder="Branch label (select a row for child/sibling/edit)", id="entry")
                         with Horizontal(classes="actions"):
                             yield Button("Add root", id="tree-root")
                             yield Button("A · Add child", id="tree-child")
@@ -1043,12 +1189,24 @@ class Workspace(FieldHelpMixin, Base):
                             yield Button("F · Fold / unfold", id="tree-toggle")
                         yield DataTable(id="tree", cursor_type="row")
                     else:
-                        yield Label("Ranked entries · local risk priority", classes="heading")
+                        noun = ENTRY_NOUN[session.method_id]
+                        yield Label(
+                            "Ranked assumptions · highest risk first"
+                            if session.method_id == "assumptions"
+                            else "Ranked failure modes · highest priority first",
+                            classes="heading",
+                        )
+                        yield Static(
+                            "Enter edits the selected row; Space shows its full text; + starts a new entry. Ratings are yours; "
+                            "the ranking is calculated locally whenever you save.",
+                            classes="muted",
+                        )
                         yield DataTable(id="entry-list", cursor_type="row")
                         with Horizontal(classes="actions"):
-                            yield Button("Calculate · refresh ranking", id="calculate-entries")
-                            yield Button("Edit selected entry", id="edit-entry")
-                            yield Button("Delete selected entry", id="delete-entry")
+                            yield Button(f"+ New {noun}", id="new-entry", variant="primary")
+                            yield Button("Edit selected", id="edit-entry")
+                            yield Button("Delete selected", id="delete-entry")
+                            yield Button("Show full text", id="expand-entries")
                         if session.method_id == "assumptions":
                             suggestions = offers(
                                 "assumptions", self.workbench.store.sessions(session.project_id), session.id
@@ -1060,16 +1218,23 @@ class Workspace(FieldHelpMixin, Base):
                                     classes="muted",
                                 )
                                 yield Button("Use next issue-tree question", id="use-issue-offer")
+                        yield Label(f"New {noun}", id="entry-mode", classes="heading")
                         yield Label(
-                            "Assumption" if session.method_id == "assumptions" else "Possible failure",
+                            "Assumption" if session.method_id == "assumptions" else "What went wrong?",
                             classes="heading",
                         )
                         yield Static(
-                            "Describe one testable claim or failure. Why: this is what you will review or prevent.",
+                            "One testable claim your plan depends on. Why: this is what you will check."
+                            if session.method_id == "assumptions"
+                            else "Imagine it is 12 months from now and the plan failed. One cause per entry. "
+                            "Why: this is what you will prevent.",
                             classes="muted",
                         )
                         with Horizontal(classes="field-editor"):
-                            yield Input(placeholder="Assumption / failure mode", id="entry")
+                            yield TextField(
+                                placeholder="Assumption" if session.method_id == "assumptions" else "Failure cause",
+                                id="entry",
+                            )
                             yield Button(
                                 "Draft text",
                                 id="help-entry",
@@ -1089,36 +1254,71 @@ class Workspace(FieldHelpMixin, Base):
                                     classes="ai-trigger",
                                     tooltip="Suggest one assumption for review in the AI panel",
                                 )
-                        yield Label("Test or prevention", classes="heading")
-                        yield Static(
-                            "Describe what to test or prevent. Why: a useful risk needs a response.", classes="muted"
-                        )
-                        with Horizontal(classes="field-editor"):
-                            yield Input(placeholder="Validation test / preventive action (optional)", id="action")
-                            yield Button(
-                                "Draft text", id="help-action", classes="ai-trigger", tooltip="Draft action text"
-                            )
+                        text_fields = ENTRY_TEXT_FIELDS[session.method_id]
+                        # Statement context first, then the user's ratings, then responses.
+                        leading = text_fields[:1]
+                        trailing = text_fields[1:]
+                        for key, label, why in leading:
+                            yield Label(label, classes="heading")
+                            yield Static(why, classes="muted")
+                            yield TextField(placeholder=label.removesuffix(" (optional)"), id=entry_input_id(key))
                         yield Label(
                             "Confidence (0–100)" if session.method_id == "assumptions" else "Likelihood (0–100)",
                             classes="heading",
                         )
                         yield Static(
-                            "Your rating, 0–100. Why: likelihood or confidence changes which risks to test first.",
+                            "How sure are you it holds, 0–100. Why: low confidence means test before relying on it."
+                            if session.method_id == "assumptions"
+                            else "How likely this failure is, 0–100. Why: likelihood changes which risks to tackle first.",
                             classes="muted",
                         )
                         yield Input(id="confidence", type="integer", placeholder="Your rating, 0–100")
-                        yield Label("Impact (1–10)", classes="heading")
+                        yield Label(
+                            "Impact if wrong (1–10)" if session.method_id == "assumptions" else "Impact (1–10)",
+                            classes="heading",
+                        )
                         yield Static(
                             "Your rating, 1–10. Why: larger consequences need closer attention.", classes="muted"
                         )
                         yield Input(id="impact", type="integer", placeholder="Your rating, 1–10")
+                        for key, label, why in trailing:
+                            yield Label(label, classes="heading")
+                            yield Static(why, classes="muted")
+                            with Horizontal(classes="field-editor"):
+                                yield TextField(placeholder=label.removesuffix(" (optional)"), id=entry_input_id(key))
+                                if key == "action":
+                                    yield Button(
+                                        "Draft text",
+                                        id="help-action",
+                                        classes="ai-trigger",
+                                        tooltip="Draft action text",
+                                    )
+                        if session.method_id == "assumptions":
+                            yield Label("Test result", classes="heading")
+                            yield Static(
+                                "Update as you test. Why: a disproved or mixed result should change the plan.",
+                                classes="muted",
+                            )
+                            yield Select(
+                                [(assumption_status_label(status), status) for status in ASSUMPTION_STATUSES],
+                                value="Untested",
+                                allow_blank=False,
+                                id="entry-status",
+                            )
                         yield Static("", id="dedicated-feedback", classes="muted")
-                        yield Button("Add / save entry", id="add", variant="primary")
-                        yield Button("Use next accepted row", id="next-draft-row")
+                        with Horizontal(classes="actions"):
+                            yield Button(f"Add {noun}", id="add", variant="primary")
+                            yield Button("Cancel edit", id="cancel-edit", disabled=True)
+                            yield Button("Use next accepted row", id="next-draft-row")
                     yield Static("", id="results")
-                yield Label("What would change your mind?", classes="heading")
+                yield Label(
+                    "Overall: what would change your conclusion?"
+                    if session.method_id in ENTRY_NOUN
+                    else "What would change your mind?",
+                    classes="heading",
+                )
                 with Horizontal(classes="field-editor"):
-                    yield Input(value=session.method_state.get("change_mind", ""), id="change-mind")
+                    yield TextField(session.method_state.get("change_mind", ""), id="change-mind")
                     if session.method_id in {"assumptions", "premortem"}:
                         yield Button(
                             "Draft text",
@@ -1128,18 +1328,21 @@ class Workspace(FieldHelpMixin, Base):
                         )
                 if session.method_id in {"assumptions", "premortem"}:
                     yield Static(
-                        "What new observation would change this assessment? Why: it makes review actionable.",
+                        "About the analysis as a whole, separate from each entry. Why: it makes review actionable.",
                         classes="muted",
                     )
                 with Horizontal(classes="actions"):
                     yield Button("Export  Ctrl+E", id="export")
+                    yield Button("Choose location…", id="export-browse")
                     yield Button("Challenge  Ctrl+K", id="challenge")
+                    yield Button("Explain results  F9", id="explain")
                     yield Button("Stop AI  Ctrl+G", id="stop-ai", disabled=True)
                     yield Button("Mark finished", id="finish-stage")
                     yield Button(
                         "Continue planned workflow" if planned_next(session) else "Recommended next method", id="plan"
                     )
                 yield Input(placeholder="Export path: ~/decision.md or ~/decision.json", id="export-path")
+            yield Static("⋮", classes="pane-handle")
             with VerticalScroll(classes="ai-pane"):
                 yield Label("AI workspace", classes="heading")
                 yield Static(
@@ -1152,7 +1355,7 @@ class Workspace(FieldHelpMixin, Base):
                 yield AIStatus("", id="ai-status")
                 yield Static("", id="ai-response")
                 if session.method_id == "assumptions":
-                    yield Input(placeholder="Edit proposed assumption before accepting", id="suggestion")
+                    yield TextField(placeholder="Edit proposed assumption before accepting", id="suggestion")
                     with Horizontal(classes="ai-actions"):
                         yield Button("Accept", id="accept")
                         yield Button("Dismiss", id="dismiss")
@@ -1168,7 +1371,7 @@ class Workspace(FieldHelpMixin, Base):
                         yield Button("Stop  Ctrl+G", id="help-stop")
 
     def on_resize(self) -> None:
-        self.query_one(".workspace-layout").set_class(self.size.width < 100, "narrow")
+        self.query_one(WorkspaceLayout).update_split(self.size.width < 100)
 
     def on_mount(self) -> None:
         self.on_resize()
@@ -1180,27 +1383,52 @@ class Workspace(FieldHelpMixin, Base):
         self.pending_ai_rows: list[str] = list(session.method_state.get("_text_row_drafts", []))
         self.accepted_draft = False
         self.editing_entry_index: int | None = None
+        # Ranked rows showing their full wrapped text, by saved entry index.
+        self.expanded_entries: set[int] = set()
         if self.pending_ai_rows and session.method_id in {"assumptions", "premortem"}:
-            self.query_one("#entry", Input).value = self.pending_ai_rows[0]
+            self.query_one("#entry", TextField).value = self.pending_ai_rows[0]
             self.accepted_draft = True
         if session.method_id == "issue_tree":
             self.query_one("#tree", DataTable).add_column("Issue branches")
         if session.method_id in {"assumptions", "premortem"}:
-            self.query_one("#entry-list", DataTable).add_columns("Statement", "Risk priority", "Action")
+            table = self.query_one("#entry-list", DataTable)
+            # Fixed widths for text columns let an expanded row wrap its full text.
+            for label, width in (
+                (
+                    ("Assumption", 34),
+                    ("Risk priority", None),
+                    ("Quadrant", None),
+                    ("Test result", 14),
+                    ("Validation test", 28),
+                )
+                if session.method_id == "assumptions"
+                else (
+                    ("Failure cause", 34),
+                    ("Risk priority", None),
+                    ("Cluster", 14),
+                    ("Prevention", 28),
+                    ("Owner", 14),
+                )
+            ):
+                table.add_column(label, width=width)
         if session.method_id == "matrix":
             self.query_one("#matrix-input", TextArea).load_text(
                 json.dumps(session.method_state, indent=2) if session.method_state else ""
             )
         elif hasattr(METHODS[session.method_id], "example"):
-            method = METHODS[session.method_id]
             state = session.method_state
             metadata = {key: value for key, value in state.items() if key.startswith("workflow_")}
-            worksheet = {**method.example, **metadata} if not state or len(state) == len(metadata) else state
+            worksheet = metadata if not state or len(state) == len(metadata) else state
             self.query_one("#structured-input", TextArea).load_text(json.dumps(worksheet, indent=2, ensure_ascii=False))
         self.refresh_results()
 
     def persist(self, description: str) -> None:
-        self.workbench.store.save(self.workbench.session, description)
+        try:
+            self.workbench.store.save(self.workbench.session, description)
+        except (sqlite3.Error, ValueError):
+            self.notify(
+                "Could not save; database is busy or changed elsewhere. Keep this window open.", severity="error"
+            )
 
     def field_help_session(self) -> Session:
         return self.workbench.session
@@ -1215,14 +1443,14 @@ class Workspace(FieldHelpMixin, Base):
             self.pending_ai_rows.extend(lines)
             self.workbench.session.method_state["_text_row_drafts"] = list(self.pending_ai_rows)
             self.persist("Accepted text-only row drafts")
-            if not self.query_one("#entry", Input).value.strip():
-                self.query_one("#entry", Input).value = self.pending_ai_rows[0]
+            if not self.query_one("#entry", TextField).value.strip():
+                self.query_one("#entry", TextField).value = self.pending_ai_rows[0]
                 self.accepted_draft = True
             self.query_one("#confidence", Input).value = ""
             self.query_one("#impact", Input).value = ""
             return
         if target in {"entry", "action", "change-mind"}:
-            self.query_one(f"#{target}", Input).value = text
+            self.query_one(f"#{target}", TextField).value = text
             if target == "entry":
                 self.accepted_draft = True
 
@@ -1232,7 +1460,7 @@ class Workspace(FieldHelpMixin, Base):
         targets = self.query("#dedicated-feedback")
         if not targets or len(self.query("#entry, #confidence, #impact")) != 3:
             return
-        statement = self.query_one("#entry", Input).value.strip()
+        statement = self.query_one("#entry", TextField).value.strip()
         confidence = self.query_one("#confidence", Input).value.strip()
         impact = self.query_one("#impact", Input).value.strip()
         message = "Describe the assumption or failure mode." if not statement else ""
@@ -1249,12 +1477,13 @@ class Workspace(FieldHelpMixin, Base):
                     message = f"{label}: enter your own whole number from {minimum} to {maximum}."
                     break
         if not message and confidence and impact:
-            score = (
-                (1 - int(confidence) / 100) * int(impact)
-                if self.workbench.session.method_id == "assumptions"
-                else int(confidence) * int(impact)
-            )
-            message = f"Local risk priority preview: {score:g}. Your ratings are not set by AI."
+            if self.workbench.session.method_id == "assumptions":
+                row = {"confidence": int(confidence), "impact": int(impact)}
+                score = METHODS["assumptions"].risk(row)
+                placement = f" · {METHODS['assumptions'].quadrant(row)}"
+            else:
+                score, placement = int(confidence) * int(impact), ""
+            message = f"Local risk priority preview: {score:g}{placement}. Your ratings are not set by AI."
         targets.first().update(message)
 
     def on_input_changed(self, event: Input.Changed) -> None:
@@ -1295,6 +1524,8 @@ class Workspace(FieldHelpMixin, Base):
         if event.data_table.id == "tree":
             # Selection changes the target, never replaces a drafted label.
             self.tree_editing = None
+        elif event.data_table.id == "entry-list":
+            self.edit_selected_entry()
 
     def selected_tree_node(self) -> dict | None:
         table = self.query_one("#tree", DataTable)
@@ -1329,7 +1560,7 @@ class Workspace(FieldHelpMixin, Base):
             return
         state = self.workbench.session.method_state
         node = self.selected_tree_node()
-        label_input = self.query_one("#entry", Input)
+        label_input = self.query_one("#entry", TextField)
         label = label_input.value
         try:
             if operation == "root":
@@ -1383,7 +1614,7 @@ class Workspace(FieldHelpMixin, Base):
             self.query_one("#tree", DataTable).focus()
 
     def action_tree_sibling(self) -> None:
-        if self.workbench.session.method_id == "issue_tree" and self.query_one("#entry", Input).has_focus:
+        if self.workbench.session.method_id == "issue_tree" and self.query_one("#entry", TextField).has_focus:
             self.tree_action("sibling")
 
     def refresh_entry_list(self, ranked: list[dict]) -> None:
@@ -1392,12 +1623,45 @@ class Workspace(FieldHelpMixin, Base):
         entries = self.workbench.session.method_state.get("entries", [])
         for row in ranked:
             index = next(i for i, entry in enumerate(entries) if entry is row)
-            risk = (
-                (1 - row.get("confidence", 50) / 100) * row.get("impact", 5)
-                if self.workbench.session.method_id == "assumptions"
-                else row.get("likelihood", 0) * row.get("impact", 0)
+            if self.workbench.session.method_id == "assumptions":
+                cells = (
+                    f"{METHODS['assumptions'].risk(row):g}",
+                    METHODS["assumptions"].quadrant(row),
+                    assumption_status_label(row.get("status")),
+                    row.get("action") or "—",
+                )
+            else:
+                cells = (
+                    f"{row.get('likelihood', 0) * row.get('impact', 0):g}",
+                    row.get("category") or "—",
+                    row.get("action") or "—",
+                    row.get("owner") or "—",
+                )
+            table.add_row(
+                row["statement"], *cells, key=str(index), height=None if index in self.expanded_entries else 1
             )
-            table.add_row(row["statement"], f"{risk:g}", row.get("action") or "—", key=str(index))
+        expand = self.query("#expand-entries")
+        if expand:
+            expand.first(Button).label = "One line per row" if self.expanded_entries else "Show full text"
+
+    def action_toggle_entry_row(self) -> None:
+        """Space on a ranked row shows or hides its full wrapped text."""
+        index = self.selected_entry_index()
+        if index is None:
+            return
+        self.expanded_entries ^= {index}
+        self.redraw_entry_list(keep=index)
+
+    def toggle_all_entry_rows(self) -> None:
+        entries = self.workbench.session.method_state.get("entries", [])
+        self.expanded_entries = set() if self.expanded_entries else set(range(len(entries)))
+        self.redraw_entry_list(keep=self.selected_entry_index())
+
+    def redraw_entry_list(self, keep: int | None) -> None:
+        self.refresh_results()
+        if keep is not None:
+            table = self.query_one("#entry-list", DataTable)
+            table.move_cursor(row=table.get_row_index(str(keep)))
 
     def selected_entry_index(self) -> int | None:
         table = self.query_one("#entry-list", DataTable)
@@ -1429,25 +1693,49 @@ class Workspace(FieldHelpMixin, Base):
         elif session.method_id == "issue_tree":
             self.refresh_tree()
         elif session.method_id == "assumptions":
-            rows = METHODS["assumptions"].calculate(state)["priorities"]
+            try:
+                result = METHODS["assumptions"].calculate(state) if state.get("entries") else {}
+            except Exception:
+                result = {}
+                output.update("Review the assumption ratings before calculating.")
+            rows = result.get("priorities", [])
             self.refresh_entry_list(rows)
+            review = result.get("review")
+            summary = (
+                [f"Tests: {review['progress']}"]
+                + [f"Disproved — revisit the plan: {item}" for item in review["disproved"]]
+                + [f"TEST FIRST, not yet tested: {item}" for item in review["untested_test_first"]]
+                if review
+                else []
+            )
             output.update(
                 "\n".join(
-                    f"{i}. {r['statement']} · risk {(1 - r.get('confidence', 50) / 100) * r.get('impact', 5):g} · {r.get('confidence', 50)}% confidence · "
-                    f"impact {r.get('impact', 5)}/10 · "
-                    f"{'TEST FIRST' if r.get('confidence', 50) < 50 and r.get('impact', 5) >= 6 else 'Review'}"
-                    f" · Test: {r.get('action') or 'not defined'}"
-                    for i, r in enumerate(rows, 1)
+                    summary
+                    + [
+                        f"{i}. {r['statement']} · risk {METHODS['assumptions'].risk(r):g} · "
+                        f"{r['confidence']}% confidence · impact {r['impact']}/10 · "
+                        f"{METHODS['assumptions'].quadrant(r)} · {assumption_status_label(r.get('status'))} · "
+                        f"Test: {r.get('action') or 'not defined'}"
+                        + (f" · Disproved if: {r['change_mind']}" if r.get("change_mind") else "")
+                        for i, r in enumerate(rows, 1)
+                    ]
                 )
             )
         elif session.method_id == "premortem":
-            rows = METHODS["premortem"].calculate(state)["risks"]
+            try:
+                rows = METHODS["premortem"].calculate(state)["risks"] if state.get("entries") else []
+            except Exception:
+                rows = []
+                output.update("Review the failure mode ratings before calculating.")
             self.refresh_entry_list(rows)
             output.update(
                 "\n".join(
                     f"{i}. {r['statement']} · likelihood {r.get('likelihood', 1)}% · "
                     f"impact {r.get('impact', 1)}/10 · priority {r.get('likelihood', 1) * r.get('impact', 1)}"
-                    f" · Prevent: {r.get('action') or 'not defined'}"
+                    + (f" · Cluster: {r['category']}" if r.get("category") else "")
+                    + f" · Prevent: {r.get('action') or 'not defined'}"
+                    + (f" · Owner: {r['owner']}" if r.get("owner") else "")
+                    + (f" · Warning sign: {r['warning_sign']}" if r.get("warning_sign") else "")
                     for i, r in enumerate(rows, 1)
                 )
             )
@@ -1480,6 +1768,12 @@ class Workspace(FieldHelpMixin, Base):
             else:
                 output.update("Draft · replace the example and calculate to save.")
 
+    @staticmethod
+    def _example_numbers_remain(state: dict, example: dict) -> bool:
+        from .form_screen import _example_numbers_remain
+
+        return _example_numbers_remain(state, example)
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         action = event.button.id
         if action in {"left", "right", "tie", "skip", "undo"}:
@@ -1508,14 +1802,14 @@ class Workspace(FieldHelpMixin, Base):
                     raise ValueError(
                         "Preserve source/workflow links in advanced JSON; create an independent analysis to detach"
                     )
-                if (
-                    action == "structured-calculate"
-                    and {
+                if action == "structured-calculate" and (
+                    {
                         key: value
                         for key, value in state.items()
-                        if key != "change_mind" and not key.startswith("workflow_")
+                        if key != "change_mind" and not key.startswith(("workflow_", "_"))
                     }
                     == method.example
+                    or (state.get("_example_loaded") and self._example_numbers_remain(state, method.example))
                 ):
                     raise ValueError("Replace the illustrative example with your own input before saving")
                 if method.id == "monte_carlo":
@@ -1525,6 +1819,7 @@ class Workspace(FieldHelpMixin, Base):
                 issues = method.validate(state)
                 if issues:
                     raise ValueError(" ".join(issues))
+                state.pop("_example_loaded", None)
                 state["change_mind"] = self.workbench.session.method_state.get("change_mind", "")
                 self.workbench.session.method_state = state
                 if planned_next(self.workbench.session) or "workflow_id" in state:
@@ -1534,14 +1829,14 @@ class Workspace(FieldHelpMixin, Base):
                     self.workbench.open_session(self.workbench.session)
                 else:
                     self.refresh_results()
-            except (ValueError, TypeError) as exc:
-                self.notify(str(exc), severity="error")
+            except Exception as exc:
+                self.notify(f"Could not calculate: {type(exc).__name__}. Review the input shapes.", severity="error")
         elif action.startswith("tree-"):
             self.tree_action(action.removeprefix("tree-"))
         elif action == "sensitivity":
             self.start_sensitivity()
         elif action == "guided":
-            self.workbench.open_session(self.workbench.session, guided=True)
+            self.action_form()
         elif action == "finish-stage":
             issues = METHODS[self.workbench.session.method_id].validate(self.workbench.session.method_state)
             if issues:
@@ -1572,26 +1867,20 @@ class Workspace(FieldHelpMixin, Base):
             existing = {row.get("statement") for row in self.workbench.session.method_state.get("entries", [])}
             candidate = next((label for label in suggestions.get("statements", []) if label not in existing), None)
             if candidate:
-                self.query_one("#entry", Input).value = candidate
+                self.query_one("#entry", TextField).value = candidate
                 self.query_one("#confidence", Input).focus()
                 self.notify("Enter your own confidence and impact before adding")
         elif action == "add":
             self.add_entry()
-        elif action == "calculate-entries":
-            self.refresh_results()
-            self.notify("Risk priorities calculated locally")
+        elif action == "new-entry":
+            self.action_new_entry()
+        elif action == "cancel-edit":
+            self.reset_entry_editor()
+            self.notify("Edit cancelled; the saved entry is unchanged")
         elif action == "edit-entry":
-            index = self.selected_entry_index()
-            if index is not None:
-                row = self.workbench.session.method_state["entries"][index]
-                self.editing_entry_index = index
-                self.query_one("#entry", Input).value = row["statement"]
-                self.query_one("#action", Input).value = row.get("action", "")
-                self.query_one("#confidence", Input).value = str(
-                    row.get("confidence" if self.workbench.session.method_id == "assumptions" else "likelihood", "")
-                )
-                self.query_one("#impact", Input).value = str(row.get("impact", ""))
-                self.query_one("#entry", Input).focus()
+            self.edit_selected_entry()
+        elif action == "expand-entries":
+            self.toggle_all_entry_rows()
         elif action == "delete-entry":
             index = self.selected_entry_index()
             if index is not None:
@@ -1600,20 +1889,25 @@ class Workspace(FieldHelpMixin, Base):
                 def finish(value: str | None) -> None:
                     if value == "DELETE":
                         self.workbench.session.method_state["entries"].pop(index)
-                        self.editing_entry_index = None
+                        self.expanded_entries = {i - (i > index) for i in self.expanded_entries if i != index}
+                        self.reset_entry_editor()
                         self.persist("Deleted entry")
                         self.refresh_results()
 
                 self.workbench.push_screen(AnalysisDialog(row["statement"], delete=True), finish)
         elif action == "export":
             self.action_export()
+        elif action == "export-browse":
+            self.browse_export()
         elif action == "challenge":
             self.action_challenge()
+        elif action == "explain":
+            self.action_explain()
         elif action == "stop-ai":
             self.action_stop_ai()
         elif action == "next-draft-row":
             if self.pending_ai_rows:
-                self.query_one("#entry", Input).value = self.pending_ai_rows[0]
+                self.query_one("#entry", TextField).value = self.pending_ai_rows[0]
                 self.query_one("#confidence", Input).value = ""
                 self.query_one("#impact", Input).value = ""
                 self.accepted_draft = True
@@ -1645,14 +1939,14 @@ class Workspace(FieldHelpMixin, Base):
         elif action == "suggest":
             self.request_ai("suggest")
         elif action == "accept":
-            suggestion = self.query_one("#suggestion", Input)
+            suggestion = self.query_one("#suggestion", TextField)
             if suggestion.value.strip():
-                self.query_one("#entry", Input).value = suggestion.value.strip()
+                self.query_one("#entry", TextField).value = suggestion.value.strip()
                 if self.add_entry(source="AI_ACCEPTED"):
                     suggestion.value = ""
                     self.query_one("#ai-response", Static).update("Accepted as user-approved assumption.")
         elif action == "dismiss":
-            self.query_one("#suggestion", Input).value = ""
+            self.query_one("#suggestion", TextField).value = ""
             self.query_one("#ai-response", Static).update("Suggestion dismissed; no data changed.")
 
     def start_sensitivity(self) -> None:
@@ -1692,8 +1986,58 @@ class Workspace(FieldHelpMixin, Base):
             "Calculated locally · user-supplied inputs\n" + json.dumps(result, indent=2, ensure_ascii=False)
         )
 
+    def entry_editor_ids(self) -> list[str]:
+        return ["entry", *(entry_input_id(key) for key, _, _ in ENTRY_TEXT_FIELDS[self.workbench.session.method_id])]
+
+    def set_entry_mode(self, index: int | None) -> None:
+        """Make it obvious whether Save adds a new row or replaces the selected one."""
+        self.editing_entry_index = index
+        method_id = self.workbench.session.method_id
+        if method_id not in ENTRY_NOUN or not self.query("#entry-mode"):
+            return
+        noun = ENTRY_NOUN[method_id]
+        self.query_one("#entry-mode", Label).update(
+            f"New {noun}" if index is None else f"Editing {noun}: changes replace the selected row"
+        )
+        self.query_one("#add", Button).label = f"Add {noun}" if index is None else f"Save changes to {noun}"
+        self.query_one("#cancel-edit", Button).disabled = index is None
+
+    def reset_entry_editor(self) -> None:
+        for ident in (*self.entry_editor_ids(), "confidence", "impact"):
+            self.query_one(f"#{ident}").value = ""
+        if self.query("#entry-status"):
+            self.query_one("#entry-status", Select).value = "Untested"
+        self.accepted_draft = False
+        self.set_entry_mode(None)
+
+    def action_new_entry(self) -> None:
+        if self.workbench.session.method_id not in ENTRY_NOUN:
+            return
+        self.reset_entry_editor()
+        self.query_one("#entry", TextField).focus()
+
+    def edit_selected_entry(self) -> None:
+        index = self.selected_entry_index()
+        if index is None:
+            self.notify("Select a row to edit", severity="warning")
+            return
+        row = self.workbench.session.method_state["entries"][index]
+        method_id = self.workbench.session.method_id
+        self.query_one("#entry", TextField).value = row["statement"]
+        for key, _, _ in ENTRY_TEXT_FIELDS[method_id]:
+            self.query_one(f"#{entry_input_id(key)}", TextField).value = str(row.get(key) or "")
+        self.query_one("#confidence", Input).value = str(
+            row.get("confidence" if method_id == "assumptions" else "likelihood", "")
+        )
+        self.query_one("#impact", Input).value = str(row.get("impact", ""))
+        if self.query("#entry-status"):
+            self.query_one("#entry-status", Select).value = row.get("status") or "Untested"
+        self.accepted_draft = False
+        self.set_entry_mode(index)
+        self.query_one("#entry", TextField).focus()
+
     def add_entry(self, source: str = "USER") -> bool:
-        statement = self.query_one("#entry", Input).value.strip()
+        statement = self.query_one("#entry", TextField).value.strip()
         if not statement:
             self.notify("Enter a statement", severity="error")
             return False
@@ -1711,22 +2055,28 @@ class Workspace(FieldHelpMixin, Base):
             return False
         if self.accepted_draft and source == "USER":
             source = "AI_ACCEPTED"
+        method_id = self.workbench.session.method_id
         entries = self.workbench.session.method_state.setdefault("entries", [])
-        row = {
-            "statement": statement,
-            "action": self.query_one("#action", Input).value,
-            "confidence": confidence,
-            "likelihood": confidence,
-            "impact": impact,
-            "source": source
-            if self.editing_entry_index is None
-            else entries[self.editing_entry_index].get("source", "USER"),
-        }
-        if self.editing_entry_index is None:
+        editing = self.editing_entry_index
+        # Editing keeps keys this editor does not show (e.g. provenance) instead of discarding them.
+        row = dict(entries[editing]) if editing is not None else {}
+        row.update(
+            {
+                "statement": statement,
+                "confidence": confidence,
+                "likelihood": confidence,
+                "impact": impact,
+                "source": source if editing is None else row.get("source", "USER"),
+            }
+        )
+        for key, _, _ in ENTRY_TEXT_FIELDS[method_id]:
+            row[key] = self.query_one(f"#{entry_input_id(key)}", TextField).value.strip()
+        if self.query("#entry-status"):
+            row["status"] = str(self.query_one("#entry-status", Select).value)
+        if editing is None:
             entries.append(row)
         else:
-            entries[self.editing_entry_index] = row
-            self.editing_entry_index = None
+            entries[editing] = row
         if self.accepted_draft and self.pending_ai_rows:
             self.pending_ai_rows.pop(0)
             if self.pending_ai_rows:
@@ -1734,15 +2084,12 @@ class Workspace(FieldHelpMixin, Base):
             else:
                 self.workbench.session.method_state.pop("_text_row_drafts", None)
         self.persist("Saved " + source + " entry")
-        self.query_one("#entry", Input).value = ""
-        self.query_one("#action", Input).value = ""
-        self.query_one("#confidence", Input).value = ""
-        self.query_one("#impact", Input).value = ""
-        self.accepted_draft = False
+        self.reset_entry_editor()
         if self.pending_ai_rows:
-            self.query_one("#entry", Input).value = self.pending_ai_rows[0]
+            self.query_one("#entry", TextField).value = self.pending_ai_rows[0]
             self.accepted_draft = True
         self.refresh_results()
+        self.notify(("Updated " if editing is not None else "Added ") + ENTRY_NOUN[method_id])
         return True
 
     def compare(self, action: str) -> None:
@@ -1786,10 +2133,20 @@ class Workspace(FieldHelpMixin, Base):
             self.query_one("#export-path", Input).focus()
             return
         try:
-            export(self.workbench.session, Path(path).expanduser(), store=self.workbench.store)
+            export(self.workbench.session, user_path(path), store=self.workbench.store)
             self.notify(f"Exported {path}")
         except (OSError, ValueError) as exc:
             self.notify(str(exc), severity="error")
+
+    def browse_export(self) -> None:
+        def chosen(path: Path | None) -> None:
+            if path is not None:
+                self.workbench.last_export_dir = path.parent
+                self.query_one("#export-path", Input).value = str(path)
+                self.action_export()
+
+        picker = ExportPicker(suggested_filename(self.workbench.session.title), self.workbench.last_export_dir)
+        self.workbench.push_screen(picker, chosen)
 
     def action_left(self) -> None:
         if self.workbench.session.method_id == "issue_tree":
@@ -1829,6 +2186,10 @@ class Workspace(FieldHelpMixin, Base):
 
     def action_challenge(self) -> None:
         self.request_ai("challenge")
+
+    def action_explain(self) -> None:
+        self.flush_journal()
+        self.workbench.push_screen(ExplainDialog(self.workbench.session))
 
     def request_ai(self, mode: str) -> None:
         if selected_provider(self.workbench.store) == "off":
@@ -1883,13 +2244,7 @@ class Workspace(FieldHelpMixin, Base):
         try:
             provider, config = await connect(store)
             # Local endpoints keep data on this machine; anything else needs explicit consent.
-            if not remote_consent(store, config):
-                status.finish("AI request not sent")
-                self.notify(
-                    f"Review AI privacy and consent in Settings before sending data to {config.preset.label}",
-                    severity="warning",
-                )
-                return
+            await require_ai_setup(store, provider, config)
             label = describe(config)
             self.notify(f"Asking {label}…", timeout=3)
             disclosure = f"{sharing_destination(config)} · Sharing: method, problem, objective, assumptions, method state (not notes or history)."
@@ -1906,9 +2261,16 @@ class Workspace(FieldHelpMixin, Base):
                         + "\nAI suggestion (streaming · not saved):\n"
                         + text_only(visible_text(self.ai_partial))
                     )
-        except (RuntimeError, KeyError) as exc:
+        except AISetupRequired as exc:
+            status.finish("AI request not sent")
+            prompt_ai_setup(self.app, exc)
+            return
+        except Exception as exc:
             status.finish("✗ AI request failed")
-            response.update(f"AI unavailable: {public_error(exc)}. Your analysis is preserved.")
+            if prompt_missing_key(self.app, exc):
+                response.update("API key needed or rejected. Your analysis is preserved.")
+            else:
+                response.update(f"AI unavailable: {public_error(exc)}. Your analysis is preserved.")
             return
         answer = visible_text(self.ai_partial).strip()
         if mode == "suggest":
@@ -1923,7 +2285,7 @@ class Workspace(FieldHelpMixin, Base):
                 status.finish("✗ AI reply was not usable")
                 response.update("AI returned an invalid suggestion. No data changed.")
                 return
-            self.query_one("#suggestion", Input).value = statement
+            self.query_one("#suggestion", TextField).value = statement
             status.finish(f"✓ Suggestion received from {label}")
             response.update(
                 disclosure + "\nAI-suggested only · edit, accept or dismiss below. Not yet part of analysis."
@@ -1934,6 +2296,13 @@ class Workspace(FieldHelpMixin, Base):
         else:
             status.finish(f"✓ Answer received from {label}")
             response.update(disclosure + "\nAI suggestion (not saved or accepted):\n" + text_only(answer))
+
+    def action_form(self) -> None:
+        if not hasattr(METHODS[self.workbench.session.method_id], "example"):
+            self.notify("This method has its own editor", severity="warning")
+            return
+        self.flush_journal()
+        self.workbench.open_session(self.workbench.session, guided=True)
 
     def action_back(self) -> None:
         self.flush_journal()
@@ -1953,7 +2322,13 @@ class Settings(Base):
         store = self.workbench.store
         yield from self.chrome()
         with VerticalScroll(classes="page"):
-            yield Label("AI settings", classes="hero")
+            yield Label("Appearance", classes="hero")
+            yield Static(
+                "Choose a palette to preview it. Save settings to keep it; Esc restores the previous palette.",
+                classes="muted",
+            )
+            yield Select(THEME_CHOICES, value=self.app.theme, id="theme", allow_blank=False)
+            yield Label("AI settings", classes="heading")
             yield Static(
                 "AI is optional. Local calculations stay local. AI receives only selected analysis context, and only when you ask. "
                 "API keys are kept in your OS keyring (or for this session only), never in the database or exports. "
@@ -1976,6 +2351,19 @@ class Settings(Base):
                 yield Input(placeholder="Model id (blank = provider default / first installed)", id="model")
                 yield Select([], prompt="Available models (Ctrl+R to refresh)", id="models")
                 yield Static("", id="models-status", classes="muted")
+                with Vertical(id="effort-box"):
+                    yield Label("Thinking effort", classes="heading")
+                    yield Select(
+                        [("Provider default", ""), ("Low", "low"), ("Medium", "medium"), ("High", "high")],
+                        id="effort",
+                        allow_blank=False,
+                    )
+                    yield Static("", id="effort-note", classes="muted")
+                yield Static(
+                    "This service does not expose a supported thinking-effort control; it uses its default.",
+                    id="effort-unavailable",
+                    classes="muted",
+                )
                 with Vertical(id="key-box"):
                     yield Label("API key", classes="heading")
                     yield Static("", id="key-status", classes="muted")
@@ -2003,7 +2391,9 @@ class Settings(Base):
             yield Button("Save settings  Ctrl+S", id="save", variant="primary")
 
     def on_mount(self) -> None:
-        self.drafts: dict[str, tuple[str, str]] = {}
+        self.original_theme = self.app.theme
+        self.theme_saved = False
+        self.drafts: dict[str, tuple[str, str, str]] = {}
         self.shown: str | None = None
         self.show_provider(selected_provider(self.workbench.store))
 
@@ -2019,12 +2409,18 @@ class Settings(Base):
             self.drafts[self.shown] = (
                 self.query_one("#base-url", Input).value.strip(),
                 self.query_one("#model", Input).value.strip(),
+                str(self.query_one("#effort", Select).value),
             )
 
     def current_config(self) -> ProviderConfig:
         preset_id = self.fields_for(self.choice)
         base = self.query_one("#base-url", Input).value.strip() or PRESETS[preset_id].base_url
-        return ProviderConfig(preset_id, base.rstrip("/"), self.query_one("#model", Input).value.strip())
+        return ProviderConfig(
+            preset_id,
+            base.rstrip("/"),
+            self.query_one("#model", Input).value.strip(),
+            str(self.query_one("#effort", Select).value) if preset_id in EFFORT_PROVIDERS else "",
+        )
 
     def show_provider(self, choice: str) -> None:
         self.stash()
@@ -2035,32 +2431,77 @@ class Settings(Base):
         note = AUTO_NOTE if choice == "auto" else preset.note
         self.query_one("#provider-note", Static).update(note)
         self.query_one("#connection").display = preset.kind != "off"
-        subscription = preset.kind in {"claude_cli", "codex_cli"}
+        subscription = preset.kind in {"claude_cli", "codex_cli", "cursor_cli"}
         self.query_one("#url-box").display = not subscription
         signin = self.query_one("#signin", Button)
         signin.display = subscription
-        signin.label = "Sign in with ChatGPT  Ctrl+L" if preset.kind == "codex_cli" else "Sign in to Claude  Ctrl+L"
+        signin.label = {
+            "codex_cli": "Sign in with ChatGPT  Ctrl+L",
+            "claude_cli": "Sign in to Claude  Ctrl+L",
+            "cursor_cli": "Sign in to Cursor  Ctrl+L",
+        }.get(preset.kind, "Sign in  Ctrl+L")
         self.query_one("#key-box").display = preset.kind in {"openai", "anthropic"}
         if preset.kind == "off":
             return
         config = config_for(self.workbench.store, preset_id)
-        base, model = self.drafts.get(preset_id, (config.base_url, config.model))
+        base, model, effort = self.drafts.get(preset_id, (config.base_url, config.model, config.effort))
         self.query_one("#base-url", Input).value = base
         self.query_one("#model", Input).value = model
+        self.update_effort(preset_id, model, effort)
+        hints = {
+            "ollama": "Requires a model supporting string think levels (low/medium/high).",
+            "openrouter": "Uses OpenRouter reasoning.effort; select a reasoning-capable model (Auto may route to one that ignores it).",
+            "groq": "Groq GPT-OSS 20B/120B supports low/medium/high reasoning_effort; other models default-only.",
+            "lmstudio": "Opt in only if your local server/model accepts OpenAI reasoning_effort.",
+            "custom": "Opt in only if this endpoint/model accepts OpenAI reasoning_effort.",
+            "anthropic": "Requires a model supporting adaptive thinking and output_config.effort.",
+            "openai": "Requires a reasoning model (GPT-4.1/4o/3.5 use default-only).",
+            "gemini": "Gemini 2.5 uses thinking_budget; Gemini 3 uses thinking_level.",
+            "mistral": "Documented Mistral models support high effort (other levels are not offered).",
+            "deepseek": "DeepSeek Flash/V4 Pro uses thinking enabled plus high reasoning_effort.",
+            "xai": "Supported for grok-4.5/4.6/4.7 models; other Grok models use their defaults.",
+            "together": "Only Together's openai/gpt-oss-120b has documented low/medium/high effort.",
+        }
+        self.query_one("#effort-note", Static).update(
+            hints.get(preset_id, "Only models supporting effort levels accept this option.")
+            + " If rejected, choose Provider default."
+        )
         self.query_one("#api-key", Input).value = ""
         self.query_one("#key-status", Static).update(key_status(preset_id))
         self.query_one("#test-result", Static).update("")
         self.query_one("#models", Select).set_options([])
         self.query_one("#models-status", Static).update("Ctrl+R to refresh available models")
 
+    def update_effort(self, preset_id: str, model: str, chosen: str) -> None:
+        levels = effort_levels(preset_id, model)
+        self.query_one("#effort-box").display = preset_id in EFFORT_PROVIDERS
+        self.query_one("#effort-unavailable").display = preset_id not in EFFORT_PROVIDERS or len(levels) == 1
+        if len(levels) == 1 and preset_id in EFFORT_PROVIDERS:
+            self.query_one("#effort-unavailable", Static).update(
+                "This model has no verified low/medium/high control here; use Provider default."
+            )
+        else:
+            self.query_one("#effort-unavailable", Static).update(
+                "This service has no documented compatible effort control; it uses Provider default."
+            )
+        names = {"": "Provider default", "low": "Low", "medium": "Medium", "high": "High"}
+        selector = self.query_one("#effort", Select)
+        selector.set_options([(names[level], level) for level in levels])
+        selector.value = chosen if chosen in levels else ""
+        selector.disabled = len(levels) == 1
+
     def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "model" and self.shown and self.shown != "off":
+            self.update_effort(self.shown, event.value.strip(), str(self.query_one("#effort", Select).value))
         if event.input.id == "base-url" and self.shown and self.query("#consent"):
             consented_url = self.workbench.store.setting(f"ai.{self.shown}.consent_url", PRESETS[self.shown].base_url)
             if event.value.strip().rstrip("/") != consented_url.rstrip("/"):
                 self.query_one("#consent", Select).value = "no"
 
     def on_select_changed(self, event: Select.Changed) -> None:
-        if event.select.id == "provider" and self.shown is not None and self.fields_for(self.choice) != self.shown:
+        if event.select.id == "theme" and event.value != Select.BLANK:
+            self.app.theme = str(event.value)
+        elif event.select.id == "provider" and self.shown is not None and self.fields_for(self.choice) != self.shown:
             self.show_provider(self.choice)
         elif event.select.id == "provider" and self.shown is not None:
             self.query_one("#provider-note", Static).update(
@@ -2071,7 +2512,11 @@ class Settings(Base):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "forget":
-            credentials.forget_key(self.fields_for(self.choice))
+            try:
+                credentials.forget_key(self.fields_for(self.choice))
+            except RuntimeError as exc:
+                self.notify(str(exc), severity="error")
+                return
             self.query_one("#key-status", Static).update(key_status(self.fields_for(self.choice)))
             self.notify("Saved key removed (environment variables are unaffected)")
         else:
@@ -2122,8 +2567,11 @@ class Settings(Base):
         status = self.query_one("#models-status", Static)
         try:
             models = await create(self.current_config(), self.typed_key()).models()
-        except RuntimeError as exc:
-            status.update(f"Could not list models: {exc}")
+        except Exception as exc:
+            status.update(f"Could not list models: {public_error(exc)}")
+            return
+        if not isinstance(models, list) or any(not isinstance(model, str) or not model for model in models):
+            status.update("Could not list models: provider returned an unreadable response")
             return
         self.query_one("#models", Select).set_options([(m, m) for m in models])
         if self.choice == "auto" and models:
@@ -2141,11 +2589,13 @@ class Settings(Base):
 
     async def test_connection(self) -> None:
         result = self.query_one("#test-result", Static)
-        config = self.current_config()
         try:
+            config = self.current_config()
             message = await create(config, self.typed_key()).health_check()
-        except RuntimeError as exc:
-            result.update(f"✗ {exc}")
+            if not isinstance(message, str):
+                raise ValueError("Invalid provider response")
+        except Exception as exc:
+            result.update(f"✗ {public_error(exc)}")
         else:
             result.update(f"✓ {describe(config)} · {message}")
 
@@ -2153,20 +2603,21 @@ class Settings(Base):
         self.stash()
         store = self.workbench.store
         try:
-            for preset_id, (base, model) in self.drafts.items():
+            changes = {}
+            for preset_id, (base, model, effort) in self.drafts.items():
                 preset = PRESETS[preset_id]
-                store.set_setting(f"ai.{preset_id}.base_url", "" if base == preset.base_url else base)
-                store.set_setting(f"ai.{preset_id}.model", "" if model == preset.default_model else model)
+                changes[f"ai.{preset_id}.base_url"] = "" if base == preset.base_url else base
+                changes[f"ai.{preset_id}.model"] = "" if model == preset.default_model else model
+                changes[f"ai.{preset_id}.effort"] = effort
                 if preset_id == "ollama":  # explicit values replace pre-1.1 settings
-                    store.set_setting("ollama_host", "")
-                    store.set_setting("ollama_model", "")
+                    changes.update({"ollama_host": "", "ollama_model": ""})
                 elif preset_id == "openai":
-                    store.set_setting("openai_model", "")
-            store.set_setting("ai_provider", self.choice)
-            store.set_setting(
-                f"ai.{self.fields_for(self.choice)}.consent", str(self.query_one("#consent", Select).value)
-            )
-            store.set_setting(f"ai.{self.fields_for(self.choice)}.consent_url", self.current_config().base_url)
+                    changes["openai_model"] = ""
+            changes["ai_provider"] = self.choice
+            changes["theme"] = str(self.query_one("#theme", Select).value)
+            changes[f"ai.{self.fields_for(self.choice)}.consent"] = str(self.query_one("#consent", Select).value)
+            changes[f"ai.{self.fields_for(self.choice)}.consent_url"] = self.current_config().base_url
+            store.set_settings(changes)
             key = self.typed_key()
             where = ""
             if key and self.query_one("#key-box").display:
@@ -2179,9 +2630,20 @@ class Settings(Base):
         except ValueError as exc:
             self.notify(str(exc), severity="error")
             return
+        except sqlite3.Error:
+            self.notify("Settings were not saved; database is read-only or busy.", severity="error")
+            return
+        except RuntimeError as exc:
+            self.notify(str(exc), severity="error")
+            return
         self.query_one("#api-key", Input).value = ""
+        self.theme_saved = True
         self.notify("Settings saved." + where)
         self.workbench.home()
+
+    def on_unmount(self) -> None:
+        if not self.theme_saved:
+            self.app.theme = self.original_theme
 
     def action_back(self) -> None:
         self.workbench.home()

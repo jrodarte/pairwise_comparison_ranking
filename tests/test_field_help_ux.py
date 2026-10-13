@@ -10,6 +10,7 @@ from thinktui.core import Session
 from thinktui.guided_screen import GuidedScreen
 from thinktui.screens import Workspace
 from thinktui.storage import Store
+from thinktui.text_field import TextField
 
 
 @pytest.mark.asyncio
@@ -79,11 +80,11 @@ async def test_dedicated_fields_and_rows_require_accept_and_user_ratings(tmp_pat
         app.screen.query_one("#help-entry", Button).press()
         await pilot.pause()
         assert not session.method_state.get("entries")
-        assert app.screen.query_one("#entry", Input).value == ""
+        assert app.screen.query_one("#entry", TextField).value == ""
         app.screen.query_one("#field-help-preview", TextArea).load_text("Test if demand persists")
         app.screen.query_one("#help-accept", Button).press()
         await pilot.pause()
-        assert app.screen.query_one("#entry", Input).value == "Test if demand persists"
+        assert app.screen.query_one("#entry", TextField).value == "Test if demand persists"
         assert not app.screen.query_one("#confidence", Input).value
         app.screen.query_one("#confidence", Input).value = "130"
         await pilot.pause()
@@ -103,17 +104,17 @@ async def test_dedicated_fields_and_rows_require_accept_and_user_ratings(tmp_pat
         await pilot.pause()
         app.screen.query_one("#help-accept", Button).press()
         await pilot.pause()
-        assert app.screen.query_one("#entry", Input).value == "Review supply"
+        assert app.screen.query_one("#entry", TextField).value == "Review supply"
         assert app.screen.pending_ai_rows == ["Review supply", "Check throughput"]
         assert len(store.load(session.id).method_state["entries"]) == 1
         assert store.load(session.id).method_state["_text_row_drafts"] == ["Review supply", "Check throughput"]
         app.open_session(store.load(session.id))
         await pilot.pause()
-        assert app.screen.query_one("#entry", Input).value == "Review supply"
+        assert app.screen.query_one("#entry", TextField).value == "Review supply"
         app.screen.query_one("#confidence", Input).value = "20"
         app.screen.query_one("#impact", Input).value = "7"
         assert app.screen.add_entry()
-        assert app.screen.query_one("#entry", Input).value == "Check throughput"
+        assert app.screen.query_one("#entry", TextField).value == "Check throughput"
         assert app.screen.query_one("#confidence", Input).value == ""
         assert store.load(session.id).method_state["_text_row_drafts"] == ["Check throughput"]
         fake.answer = "Score 90"
@@ -121,7 +122,7 @@ async def test_dedicated_fields_and_rows_require_accept_and_user_ratings(tmp_pat
         await pilot.pause()
         assert "numeric" in str(app.screen.query_one("#field-help-status", Static).content)
         app.screen.query_one("#help-accept", Button).press()
-        assert app.screen.query_one("#action", Input).value == ""
+        assert app.screen.query_one("#action", TextField).value == ""
 
 
 @pytest.mark.asyncio
@@ -152,7 +153,7 @@ async def test_stop_with_focused_editor_never_accepts_partial(tmp_path, monkeypa
             app.screen.query_one("#field-alternatives", TextArea).focus()
             app.screen.query_one("#help-suggest-alternatives", Button).press()
         else:
-            app.screen.query_one("#entry", Input).focus()
+            app.screen.query_one("#entry", TextField).focus()
             app.screen.query_one("#help-entry", Button).press()
         await pilot.pause()
         await pilot.press("ctrl+g")
@@ -204,7 +205,8 @@ async def test_remote_consent_and_off_mode_do_not_send_field_help(tmp_path, monk
         app.screen.query_one("#help-entry", Button).press()
         await pilot.pause()
         assert not fake.requests
-        assert "consent" in str(app.screen.query_one("#field-help-status", Static).content)
+        assert app.screen.__class__.__name__ == "AISetupDialog"
+        await pilot.press("escape")
         store.set_setting("ai_provider", "off")
         app.screen.query_one("#help-entry", Button).press()
         await pilot.pause()

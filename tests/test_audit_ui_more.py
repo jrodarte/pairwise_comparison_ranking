@@ -17,6 +17,7 @@ from thinktui.guided_workflow import LabelMappingRequired, ScenarioMappingRequir
 from thinktui.reports import export
 from thinktui.screens import HelpDialog, Settings, Workspace
 from thinktui.storage import Store
+from thinktui.text_field import TextField
 
 
 @pytest.mark.parametrize("method", ["assumptions", "premortem"])
@@ -52,8 +53,8 @@ async def test_dedicated_entry_edit_and_confirmed_delete(tmp_path, method):
         assert ("7.2" if method == "assumptions" else "180") in str(table.get_row_at(0))
         screen.query_one("#edit-entry", Button).press()
         await pilot.pause()
-        assert screen.query_one("#entry", Input).value == "Original"
-        screen.query_one("#entry", Input).value = "Revised"
+        assert screen.query_one("#entry", TextField).value == "Original"
+        screen.query_one("#entry", TextField).value = "Revised"
         screen.query_one("#add", Button).press()
         await pilot.pause()
         assert len(store.load(session.id).method_state["entries"]) == 1
@@ -232,8 +233,8 @@ async def test_guided_saved_row_edit_and_delete(tmp_path, method):
         screen = app.screen
         assert isinstance(screen, GuidedScreen)
         await screen.action_edit_saved()
-        assert screen.query_one(f"#field-{name_key}", Input).value == state[rows_key][0][name_key]
-        screen.query_one(f"#field-{name_key}", Input).value = "Updated user entry"
+        assert screen.query_one(f"#field-{name_key}", TextField).value == state[rows_key][0][name_key]
+        screen.query_one(f"#field-{name_key}", TextField).value = "Updated user entry"
         await screen.action_next()
         await pilot.pause()
         assert len(store.load(session.id).method_state[rows_key]) == 1
@@ -273,7 +274,7 @@ async def test_guided_forecast_picker_resolves_older_forecast(tmp_path):
         assert len(picker._options) == 2
         picker.value = 0
         await pilot.pause()
-        app.screen.query_one("#field-outcome", Input).value = "yes"
+        app.screen.query_one("#field-outcome", TextField).value = "yes"
         await app.screen.action_next()
         assert store.load(session.id).method_state["forecasts"][0]["outcome"] == 1
         assert store.load(session.id).method_state["forecasts"][1]["outcome"] is None

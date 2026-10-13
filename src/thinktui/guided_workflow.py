@@ -303,17 +303,44 @@ class MatrixMappingRequired(ValueError):
         self.index, self.previous, self.proposed = index, previous, proposed
 
 
-def checked_label_mapping(previous: list[str], proposed: list[str], mapping: list[int | None]) -> None:
-    """Never discard a saved ACH/AHP judgment during a rename or reorder."""
-    if (
-        len(previous) != len(proposed)
-        or len(mapping) != len(proposed)
-        or any(type(source) is not int for source in mapping)
-        or set(mapping) != set(range(len(previous)))
+def checked_label_mapping(
+    previous: list[str], proposed: list[str], mapping: list[int | None], *, discard_judgments: bool = False
+) -> None:
+    """Never drop an unmapped ACH/AHP judgment without named, explicit consent."""
+    if len(mapping) != len(proposed) or any(
+        source is not None and (type(source) is not int or not 0 <= source < len(previous)) for source in mapping
     ):
-        raise ValueError(
-            "Map every saved label exactly once; create a separate analysis to change the number of judged labels"
+        raise ValueError("Map each label to an old label or choose a new blank label")
+    retained = [source for source in mapping if source is not None]
+    if len(retained) != len(set(retained)):
+        raise ValueError("Each saved label can be mapped only once")
+    lost = [label for i, label in enumerate(previous) if i not in retained]
+    if lost and not discard_judgments:
+        raise ValueError("Confirm discarding saved judgments for: " + ", ".join(lost))
+
+
+def remap_judgments(matrix: list[list[float]], mapping: list[int | None]) -> list[list[float | str]]:
+    """Retain the original submatrix and leave all *new* pairwise judgments blank."""
+    return [
+        [
+            matrix[left][right] if left is not None and right is not None else 1.0 if i == j else ""
+            for j, right in enumerate(mapping)
+        ]
+        for i, left in enumerate(mapping)
+    ]
+
+
+def complete_judgments(matrix: object, size: int) -> bool:
+    return (
+        isinstance(matrix, list)
+        and len(matrix) == size
+        and all(
+            isinstance(row, list)
+            and len(row) == size
+            and all(type(value) in (int, float) and math.isfinite(value) and value > 0 for value in row)
+            for row in matrix
         )
+    )
 
 
 def matrix_score_present(value: object) -> bool:
@@ -363,14 +390,28 @@ def reachable_index(method: str, state: dict) -> int:
             return 0
         if len(state.get("alternatives", [])) < 2:
             return 1
-        if not state.get("criteria_matrix"):
+        if not complete_judgments(state.get("criteria_matrix"), len(criteria)):
             return 2
+        alternatives_matrices = state.get("alternative_matrices", {})
+        if not isinstance(alternatives_matrices, dict):
+            return 3
         for index, criterion in enumerate(criteria):
-            if criterion not in state.get("alternative_matrices", {}):
+            if not complete_judgments(alternatives_matrices.get(criterion), len(state["alternatives"])):
                 return 3 + index
         return 3 + len(criteria)
     if method == "ach":
-        return 0 if len(state.get("hypotheses", [])) < 2 else 1 if not state.get("evidence") else 2
+        hypotheses = state.get("hypotheses", [])
+        if len(hypotheses) < 2:
+            return 0
+        evidence = state.get("evidence", [])
+        if not evidence or any(
+            not isinstance(row.get("ratings"), dict)
+            or set(row["ratings"]) != set(hypotheses)
+            or any(value not in {"++", "+", "0", "-", "--", "?"} for value in row["ratings"].values())
+            for row in evidence
+        ):
+            return 1
+        return 2
     if method == "forecasting":
         return 3 if state.get("forecasts") else 1 if state.get("_draft") else 0
     if method == "scenarios":
@@ -401,6 +442,7 @@ def advance(
     *,
     mapping: list[int | None] | None = None,
     discard_scores: bool = False,
+    discard_judgments: bool = False,
 ) -> dict:
     """Return a fresh state after one validated step. Failure cannot mutate persisted data."""
     data = deepcopy(state)
@@ -488,25 +530,29 @@ def advance(
             if (
                 data.get(key)
                 and data[key] != labels
-                and (data.get("criteria_matrix") or data.get("alternative_matrices"))
+                and (
+                    data.get("criteria_matrix") or data.get("alternative_matrices")
+                    if index == 0
+                    else data.get("alternative_matrices")
+                )
             ):
                 before = data[key]
                 if mapping is None:
                     raise LabelMappingRequired("ahp", index, before, labels)
-                checked_label_mapping(before, labels, mapping)
+                checked_label_mapping(before, labels, mapping, discard_judgments=discard_judgments)
                 if index == 0:
                     matrix = data.get("criteria_matrix")
                     if matrix:
-                        data["criteria_matrix"] = [[matrix[i][j] for j in mapping] for i in mapping]
+                        data["criteria_matrix"] = remap_judgments(matrix, mapping)
                     old_alternatives = data.get("alternative_matrices", {})
                     data["alternative_matrices"] = {
                         label: old_alternatives[before[source]]
                         for label, source in zip(labels, mapping, strict=True)
-                        if before[source] in old_alternatives
+                        if source is not None and before[source] in old_alternatives
                     }
                 else:
                     for criterion, matrix in data.get("alternative_matrices", {}).items():
-                        data["alternative_matrices"][criterion] = [[matrix[i][j] for j in mapping] for i in mapping]
+                        data["alternative_matrices"][criterion] = remap_judgments(matrix, mapping)
             data[key] = labels
         elif index == 2:
             data["criteria_matrix"] = matrix_from_pairs(len(data["criteria"]), values)
@@ -522,10 +568,11 @@ def advance(
                 before = data["hypotheses"]
                 if mapping is None:
                     raise LabelMappingRequired("ach", index, before, labels)
-                checked_label_mapping(before, labels, mapping)
+                checked_label_mapping(before, labels, mapping, discard_judgments=discard_judgments)
                 for entry in data["evidence"]:
                     entry["ratings"] = {
-                        label: entry["ratings"][before[source]] for label, source in zip(labels, mapping, strict=True)
+                        label: entry["ratings"].get(before[source], "") if source is not None else ""
+                        for label, source in zip(labels, mapping, strict=True)
                     }
             data["hypotheses"] = labels
         elif index == 1:
@@ -566,8 +613,17 @@ def advance(
             percent = number(values["probability"], "Probability", 0)
             if percent > 100:
                 raise ValueError("Probability must be 0–100%")
-            draft = data.pop("_draft")
-            data.setdefault("forecasts", []).append({**draft, "probability": percent / 100, "outcome": None})
+            draft = data.get("_draft")
+            if not isinstance(draft, dict) or not draft.get("question"):
+                raise ValueError("Return to the forecast question before setting its probability")
+            forecasts = data.setdefault("forecasts", [])
+            selected = data.get("_forecast_edit_index")
+            entry = {**draft, "probability": percent / 100, "outcome": None}
+            if type(selected) is int and 0 <= selected < len(forecasts):
+                forecasts[selected] = entry
+            else:
+                forecasts.append(entry)
+                data["_forecast_edit_index"] = len(forecasts) - 1
         elif index == 2:
             response = values["outcome"].strip().casefold()
             if response not in {"yes", "no", "?", ""}:

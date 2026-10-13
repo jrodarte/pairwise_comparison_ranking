@@ -7,9 +7,10 @@ from copy import deepcopy
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Button, Checkbox, Label, Select, Static
+from textual.widgets import Button, Checkbox
 
 from .guided_workflow import MatrixMappingRequired, advance, matrix_mapping
+from .safe_widgets import Label, Select, Static
 
 
 class MatrixMappingDialog(ModalScreen[dict | None]):

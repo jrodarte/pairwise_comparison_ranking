@@ -18,8 +18,10 @@ class StructuredMethod:
     def validate(self, state: dict) -> list[str]:
         try:
             self.calculate(state)
-        except (ValueError, KeyError, TypeError) as exc:
-            return [str(exc)]
+        except Exception as exc:
+            if isinstance(exc, ValueError):
+                return [str(exc)]
+            return ["Input has an invalid shape or an out-of-range number; review the named fields."]
         return []
 
     def summarize(self, state: dict) -> str:
@@ -34,10 +36,12 @@ def number(value: Any, label: str, minimum: float | None = None) -> float:
         raise ValueError(f"{label} must be a finite number")
     try:
         result = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         raise ValueError(f"{label} must be a finite number") from None
     if not math.isfinite(result) or (minimum is not None and result < minimum):
-        raise ValueError(f"{label} must be finite and at least {minimum}")
+        raise ValueError(
+            f"{label} must be a finite number" + (f" of at least {minimum}" if minimum is not None else "")
+        )
     return result
 
 
@@ -61,7 +65,14 @@ class ACH(StructuredMethod):
     description = "Rank hypotheses by weighted contradicting evidence, not supporting evidence."
     example = {
         "hypotheses": ["H1", "H2"],
-        "evidence": [{"title": "Observed latency", "reliability": 1, "ratings": {"H1": "--", "H2": "+"}}],
+        "evidence": [
+            {
+                "title": "Observed latency",
+                "source": "Monitoring dashboard",
+                "reliability": 1,
+                "ratings": {"H1": "--", "H2": "+"},
+            }
+        ],
     }
     RATINGS = {"--": -2, "-": -1, "0": 0, "+": 1, "++": 2, "?": None}
 
@@ -111,8 +122,14 @@ class ExpectedValue(StructuredMethod):
     description = "Compute probability-weighted outcomes for alternatives."
     example = {
         "alternatives": [
-            {"name": "Build", "outcomes": [{"probability": 0.7, "value": 200}, {"probability": 0.3, "value": -50}]},
-            {"name": "Wait", "outcomes": [{"probability": 1, "value": 0}]},
+            {
+                "name": "Build",
+                "outcomes": [
+                    {"name": "Adopted", "probability": 0.7, "value": 200},
+                    {"name": "Not adopted", "probability": 0.3, "value": -50},
+                ],
+            },
+            {"name": "Wait", "outcomes": [{"name": "Status quo", "probability": 1, "value": 0}]},
         ]
     }
 

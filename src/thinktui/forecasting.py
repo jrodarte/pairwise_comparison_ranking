@@ -76,8 +76,11 @@ class ReferenceClass(StructuredMethod):
     category = "Forecasting"
     description = "Compare an inside estimate against actual/estimated ratios from user-entered cases."
     example = {
+        "question": "How many months will the migration take?",
+        "reference_class": "Internal data-platform migrations since 2020",
         "cases": [{"name": "Project A", "estimate": 3, "actual": 5}, {"name": "Project B", "estimate": 4, "actual": 8}],
         "inside_estimate": 6,
+        "adjusted_estimate": 9,
     }
 
     def calculate(self, state: dict) -> dict:
@@ -92,6 +95,9 @@ class ReferenceClass(StructuredMethod):
                 raise ValueError("Case estimate must be positive")
             ratios.append(actual / estimate)
         inside = number(state["inside_estimate"], "Inside estimate", 0)
+        adjusted = state.get("adjusted_estimate")
+        # The final forecast is the user's own judgment after seeing the outside view; never computed for them.
+        adjusted = None if adjusted in (None, "") else number(adjusted, "Adjusted estimate", 0)
         return {
             "cases": len(cases),
             "mean_overrun_ratio": statistics.mean(ratios),
@@ -101,6 +107,7 @@ class ReferenceClass(StructuredMethod):
             "outside_view_median": inside * statistics.median(ratios),
             "outside_view_p10": inside * percentile(ratios, 0.1),
             "outside_view_p90": inside * percentile(ratios, 0.9),
+            **({"your_adjusted_estimate": adjusted} if adjusted is not None else {}),
             "note": "Only user-supplied cases; validity depends on reference-class comparability.",
         }
 
@@ -132,6 +139,38 @@ def draw(rng: random.Random, spec: dict) -> float:
         if not values:
             raise ValueError("At least one sample is required")
         return rng.choice(values)
+    raise ValueError("Unknown distribution")
+
+
+def prepared_draw(spec: dict):
+    """Validate and parse a distribution once, not on every simulation draw."""
+    kind = spec["distribution"]
+    if kind == "uniform":
+        low, high = number(spec["min"], "Minimum"), number(spec["max"], "Maximum")
+        if low >= high:
+            raise ValueError("Uniform min must be below max")
+        return lambda rng: rng.uniform(low, high)
+    if kind == "triangular":
+        low, mode, high = (number(spec[k], k) for k in ("min", "mode", "max"))
+        if not low <= mode <= high or low == high:
+            raise ValueError("Triangular requires min <= mode <= max and min < max")
+        return lambda rng: rng.triangular(low, high, mode)
+    if kind in {"normal", "lognormal"}:
+        mean = number(spec["mean"], "Mean (log scale for lognormal)")
+        sd = number(spec["sd"], "Standard deviation", 0)
+        if kind == "lognormal" and mean + 6 * sd > 700:
+            raise ValueError("Lognormal mean and deviation are too large on the log scale")
+        return (lambda rng: rng.gauss(mean, sd)) if kind == "normal" else (lambda rng: rng.lognormvariate(mean, sd))
+    if kind in {"discrete", "samples"}:
+        values = [number(value, "Value") for value in spec["values"]]
+        if not values:
+            raise ValueError("At least one value is required")
+        if kind == "samples":
+            return lambda rng: rng.choice(values)
+        weights = [number(weight, "Discrete weight", 0) for weight in spec["weights"]]
+        if len(weights) != len(values) or sum(weights) <= 0:
+            raise ValueError("Discrete values need matching nonnegative weights with positive sum")
+        return lambda rng: rng.choices(values, weights=weights)[0]
     raise ValueError("Unknown distribution")
 
 
@@ -167,11 +206,15 @@ class MonteCarlo(StructuredMethod):
         constant = number(state.get("constant", 0), "Constant")
         threshold = number(state.get("threshold", 0), "Threshold")
         coefficients = [number(v.get("coefficient", 1), "Coefficient") for v in variables]
+        draws = [prepared_draw(spec) for spec in variables]
         rng = random.Random(seed)
-        results = [
-            constant + sum(c * draw(rng, spec) for c, spec in zip(coefficients, variables, strict=True))
-            for _ in range(iterations)
-        ]
+        try:
+            results = [
+                constant + sum(c * sample(rng) for c, sample in zip(coefficients, draws, strict=True))
+                for _ in range(iterations)
+            ]
+        except OverflowError:
+            raise ValueError("Simulated result overflowed; reduce the log-scale mean or other inputs") from None
         if not all(math.isfinite(v) for v in results):
             raise ValueError("Simulated result is not finite")
         return {
